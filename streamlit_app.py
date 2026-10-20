@@ -7,8 +7,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
-from docx.shared import Inches, Pt, RGBColor
 
 st.set_page_config(page_title="Ruang Anggaran — Dashboard RAB & TOR",page_icon="balmon.png", layout="wide")
 ROOT = Path(__file__).resolve().parent
@@ -1171,6 +1169,17 @@ def load_analysis():
                 st.session_state.analyses = analyses
                 st.session_state.selected_sheet = default_selection
                 st.session_state.pop("tor_result", None)
+                for key in list(st.session_state):
+                    if key.startswith((
+                        "tor_beneficiaries_",
+                        "tor_strategy_",
+                        "tor_schedule_",
+                        "tor_kpi_output_",
+                        "tor_kpi_outcome_",
+                        "tor_cost_benefit_",
+                        "tor_risks_",
+                    )):
+                        st.session_state.pop(key, None)
                 for key in ("tor_activity", "tor_location", "tor_year", "tor_notes", "tor_ro_code", "_tor_activity_ro"):
                     st.session_state.pop(key, None)
         except Exception as error:
@@ -1491,204 +1500,215 @@ def set_docx_paragraph_text(paragraph, text):
         paragraph.add_run(text)
 
 
-def make_tor_from_local_template(activity, location, year, sheet_name, notes, ro_code, budget_data):
+def docx_table_frame(table, first_data_row=1, column_names=None):
+    if column_names is None:
+        column_names = [clean_text(cell.text) for cell in table.rows[first_data_row - 1].cells]
+    rows = [
+        [cell.text for cell in row.cells]
+        for row in table.rows[first_data_row:]
+    ]
+    return pd.DataFrame(rows, columns=column_names)
+
+
+def docx_frame_rows(frame):
+    return [
+        ["" if pd.isna(value) else str(value) for value in row]
+        for row in frame.astype(object).values.tolist()
+    ]
+
+
+def tor_budget_amount(budget_data):
+    amount = budget_data.get("Pagu Efektif")
+    return amount if amount is not None else budget_data.get("Pagu Penuh")
+
+
+def write_docx_table_rows(table, rows, first_data_row=1, remove_extra=False):
+    available = len(table.rows) - first_data_row
+    if len(rows) > available:
+        raise ValueError("Jumlah baris penyesuaian melebihi struktur tabel pada template TOR.")
+    for row_index, values in enumerate(rows, start=first_data_row):
+        table_row = table.rows[row_index]
+        if len(values) != len(table_row.cells):
+            raise ValueError("Jumlah kolom penyesuaian tidak sesuai dengan tabel template TOR.")
+        for cell, value in zip(table_row.cells, values):
+            set_docx_paragraph_text(cell.paragraphs[0], str(value))
+            for paragraph in cell.paragraphs[1:]:
+                set_docx_paragraph_text(paragraph, "")
+    if remove_extra:
+        for row in list(table.rows[first_data_row + len(rows):]):
+            table._tbl.remove(row._tr)
+
+
+def get_tor_hierarchy(analysis, selected_row):
+    rows = analysis.get("rows", [])
+    selected_index = next(
+        (index for index, row in enumerate(rows) if row is selected_row),
+        -1,
+    )
+    if selected_index < 0:
+        return {}, []
+
+    hierarchy = {"RO": selected_row}
+    child = selected_row
+    child_index = selected_index
+    parent_levels = {"RO": "KRO", "KRO": "KEGIATAN", "KEGIATAN": "PROGRAM"}
+    for parent_level in parent_levels.values():
+        parent_code = child.get("Induk", "")
+        if not parent_code:
+            break
+        parent = next(
+            (
+                (index, row) for index, row in reversed(list(enumerate(rows[:child_index])))
+                if row.get("Kode") == parent_code and row.get("Tingkat") == BUDGET_LEVEL_LABELS[parent_level]
+            ),
+            None,
+        )
+        if parent is None:
+            break
+        child_index, child = parent
+        hierarchy[parent_level] = child
+
+    descendants = []
+    for row in rows[selected_index + 1:]:
+        if row.get("Tingkat") in ("Program", "Kegiatan", "KRO", "RO"):
+            break
+        if row.get("Tingkat") in ("Komponen", "Subkomponen", "Detil belanja"):
+            descendants.append(row)
+    return hierarchy, descendants
+
+
+def tor_strategy_default(selected_row, descendants):
+    lines = ["Keluaran yang dituju: {}.".format(selected_row["Uraian"])]
+    if descendants:
+        lines.append("Rincian kegiatan berdasarkan Rincian Kertas Kerja:")
+        lines.extend(
+            "- {} {} — {}".format(row["Tingkat"], row["Kode"], row["Uraian"]).strip()
+            for row in descendants
+        )
+    else:
+        lines.append("Rincian pelaksanaan disesuaikan dengan komponen kegiatan pada Rincian Kertas Kerja.")
+    return "\n".join(lines)
+
+
+def replace_tor_strategy(document, strategy_text):
+    paragraphs = document.paragraphs
+    method_index = next(
+        (index for index, paragraph in enumerate(paragraphs) if paragraph.text.strip() == "Metode Pelaksanaan"),
+        None,
+    )
+    end_index = next(
+        (
+            index for index, paragraph in enumerate(paragraphs)
+            if method_index is not None and index > method_index
+            and paragraph.text.strip() == "Tahapan dan Waktu Pelaksanaan"
+        ),
+        None,
+    )
+    if method_index is None or end_index is None:
+        raise ValueError("Bagian strategi pelaksanaan tidak ditemukan pada template TOR.")
+
+    target_paragraphs = paragraphs[method_index + 1:end_index]
+    lines = [line.strip() for line in strategy_text.splitlines() if line.strip()]
+    if not target_paragraphs:
+        raise ValueError("Template TOR tidak menyediakan paragraf untuk strategi pelaksanaan.")
+    if not lines:
+        lines = [""]
+    if len(lines) > len(target_paragraphs):
+        lines = lines[:len(target_paragraphs) - 1] + ["\n".join(lines[len(target_paragraphs) - 1:])]
+
+    for paragraph, line in zip(target_paragraphs, lines):
+        set_docx_paragraph_text(paragraph, line)
+    for paragraph in target_paragraphs[len(lines):]:
+        paragraph._element.getparent().remove(paragraph._element)
+
+
+def set_tor_budget_cost(document, budget_data):
+    amount = tor_budget_amount(budget_data)
+    if amount is None:
+        replacement = "[Pagu belum tersedia pada dashboard]"
+    else:
+        replacement = format_rupiah(amount)
+
+    paragraph = next(
+        (
+            paragraph for paragraph in document.paragraphs
+            if paragraph.text.startswith("Biaya yang diperlukan untuk kegiatan ini sebesar")
+        ),
+        None,
+    )
+    if paragraph is None:
+        raise ValueError("Bagian Biaya yang Diperlukan tidak ditemukan pada template TOR.")
+    runs = paragraph.runs
+    for run_index, run in enumerate(runs):
+        match = re.match(r"(\s*)([\d.,]+)(.*)", run.text)
+        if match and any(
+            previous.text.rstrip().endswith("Rp")
+            for previous in runs[:run_index]
+        ):
+            run.text = match.group(1) + replacement.replace("Rp ", "") + match.group(3)
+            return
+    text = paragraph.text
+    updated, count = re.subn(r"(?<=Rp )[\d.,]+", replacement.replace("Rp ", ""), text, count=1)
+    if not count:
+        raise ValueError("Nilai biaya pada template TOR tidak dapat diperbarui.")
+    set_docx_paragraph_text(paragraph, updated)
+
+
+def make_tor_from_local_template(ro_code, budget_data, hierarchy, adjustments):
     template_path = find_local_tor_template()
     if template_path is None:
-        return None
+        raise FileNotFoundError("Template TOR Word tidak ditemukan di folder aplikasi.")
 
     document = Document(str(template_path))
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if re.fullmatch(r"TAHUN\s+\d{4}", text, re.I):
-            set_docx_paragraph_text(paragraph, "TAHUN {}".format(year))
-        elif re.fullmatch(r"KELUARAN \(OUTPUT\) TA\s+\d{4}", text, re.I):
-            set_docx_paragraph_text(paragraph, "KELUARAN (OUTPUT) TA {}".format(year))
-        elif text.casefold() in {
-            "latar belakang",
-            "gambaran umum",
-            "kpi output",
-            "analisis biaya dan manfaat",
-            "manajemen risiko",
-        }:
-            for run in paragraph.runs:
-                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    if len(document.tables) < 10:
+        raise ValueError("Struktur tabel template TOR tidak sesuai dengan template yang didukung.")
 
-    if document.tables:
-        metadata = document.tables[0]
-        parts = ro_code.split(".") if ro_code else []
-        if len(metadata.rows) >= 4 and len(metadata.columns) >= 3:
-            if len(parts) >= 2:
-                set_docx_paragraph_text(metadata.cell(2, 1).paragraphs[0], ".".join(parts[:2]))
-            if ro_code:
-                set_docx_paragraph_text(metadata.cell(3, 1).paragraphs[0], ro_code)
-            set_docx_paragraph_text(metadata.cell(3, 2).paragraphs[0], activity)
-            for label, value in (
-                ("Lokasi Pelaksanaan", location),
-                ("Sumber Data", sheet_name),
-                ("Tujuan / Catatan", notes or "[PERLU DILENGKAPI]"),
-            ):
-                cells = metadata.add_row().cells
-                set_docx_paragraph_text(cells[0].paragraphs[0], label)
-                set_docx_paragraph_text(cells[1].paragraphs[0], ":")
-                set_docx_paragraph_text(cells[2].paragraphs[0], value)
+    metadata = document.tables[0]
+    for row_index, level in ((0, "PROGRAM"), (1, "KEGIATAN"), (2, "KRO"), (3, "RO")):
+        item = hierarchy.get(level)
+        code = item["Kode"] if item else "[Tidak tersedia di dashboard]"
+        description = item["Uraian"] if item else "[Tidak tersedia di dashboard]"
+        if level == "RO":
+            code = ro_code or code
+            description = budget_data.get("Uraian", description)
+        set_docx_paragraph_text(metadata.cell(row_index, 1).paragraphs[0], code)
+        set_docx_paragraph_text(metadata.cell(row_index, 2).paragraphs[0], description)
 
-    if len(document.tables) > 5 and document.tables[5].rows:
-        schedule = document.tables[5]
-        for cell in schedule.rows[0].cells[2:]:
-            set_docx_paragraph_text(cell.paragraphs[0], year)
-
-    for table_index in (4, 5, 6, 7, 8, 9):
-        if table_index < len(document.tables) and document.tables[table_index].rows:
-            for cell in document.tables[table_index].rows[0].cells:
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-
-    if len(document.tables) > 8 and len(document.tables[8].rows) > 1:
-        financing = document.tables[8]
-        if budget_data:
-            budget_text = (
-                "Biaya kegiatan {}: pagu penuh {}, pagu efektif {}, pagu terblokir {}, "
-                "realisasi {}, dan sisa anggaran {}."
-            ).format(
-                activity,
-                format_rupiah(budget_data.get("Pagu Penuh")),
-                format_rupiah(budget_data.get("Pagu Efektif")),
-                format_rupiah(budget_data.get("Pagu Terblokir")),
-                format_rupiah(budget_data.get("Realisasi")),
-                format_rupiah(budget_data.get("Sisa anggaran")),
-            )
-            set_docx_paragraph_text(financing.cell(1, 0).paragraphs[0], budget_text)
-            set_docx_paragraph_text(
-                financing.cell(1, 1).paragraphs[0],
-                "[PERLU DISESUAIKAN] Lengkapi manfaat yang sesuai dengan RO terpilih.",
-            )
-            for row in financing.rows[2:5]:
-                set_docx_paragraph_text(
-                    row.cells[0].paragraphs[0],
-                    "[PERLU DIISI] Komponen biaya yang sesuai dengan RO terpilih.",
-                )
-                set_docx_paragraph_text(
-                    row.cells[1].paragraphs[0],
-                    "[PERLU DIISI] Manfaat dari komponen biaya tersebut.",
-                )
-
-    note = document.add_paragraph()
-    note.paragraph_format.space_before = Pt(8)
-    note_run = note.add_run(
-        "CATATAN DRAFT: Bagian bertanda kuning perlu ditinjau dan disesuaikan sebelum TOR disahkan."
-    )
-    note_run.font.name = "Times New Roman"
-    note_run.font.size = Pt(10)
-    note_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-
-    output = io.BytesIO()
-    document.save(output)
-    return output.getvalue()
-
-
-def make_tor_docx(activity, location, year, sheet_name, sections, ro_code="", budget_data=None, notes=""):
-    template_document = make_tor_from_local_template(
-        activity, location, year, sheet_name, notes, ro_code, budget_data,
-    )
-    if template_document is not None:
-        return template_document
-
-    document = Document()
-    section = document.sections[0]
-    section.page_width = Inches(8.27)
-    section.page_height = Inches(11.69)
-    section.top_margin = Inches(0.98)
-    section.bottom_margin = Inches(0.98)
-    section.left_margin = Inches(0.98)
-    section.right_margin = Inches(0.98)
-    normal_style = document.styles["Normal"]
-    normal_style.font.name = "Times New Roman"
-    normal_style.font.size = Pt(11)
-    normal_style.paragraph_format.line_spacing = 1.5
-    normal_style.paragraph_format.space_after = Pt(0)
-
-    def format_paragraph(paragraph, size=11, bold=None, color=None, alignment=None):
-        if alignment is not None:
-            paragraph.alignment = alignment
-        paragraph.paragraph_format.line_spacing = 1.5
-        paragraph.paragraph_format.space_after = Pt(0)
-        for run in paragraph.runs:
-            run.font.name = "Times New Roman"
-            run.font.size = Pt(size)
-            if bold is not None:
-                run.bold = bold
-            if color is not None:
-                run.font.color.rgb = RGBColor.from_string(color)
-
-    cover_title = document.add_paragraph()
-    cover_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    cover_title.paragraph_format.space_before = Pt(18)
-    cover_title.add_run("TOR (TERM OF REFERENCE)")
-    format_paragraph(cover_title, size=14, bold=True, color="092759")
-    for text in (
-        "BALAI MONITOR SPEKTRUM FREKUENSI RADIO KELAS I SURABAYA",
-        "DIREKTORAT JENDERAL INFRASTRUKTUR DIGITAL",
-        "KEMENTERIAN KOMUNIKASI DAN DIGITAL RI",
-        "TAHUN {}".format(year),
+    for key, table_index, first_data_row, remove_extra in (
+        ("beneficiaries", 4, 1, False),
+        ("schedule", 5, 2, False),
+        ("kpi_output", 6, 1, False),
+        ("kpi_outcome", 7, 1, False),
+        ("cost_benefit", 8, 1, False),
+        ("risks", 9, 1, False),
     ):
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        paragraph.add_run(text)
-        format_paragraph(paragraph, size=11, bold=True, color="092759")
+        if key in adjustments:
+            write_docx_table_rows(
+                document.tables[table_index],
+                adjustments[key],
+                first_data_row=first_data_row,
+                remove_extra=remove_extra,
+            )
+    if "strategy" in adjustments:
+        replace_tor_strategy(document, adjustments["strategy"])
+    set_tor_budget_cost(document, budget_data)
 
-    document.add_page_break()
-    heading = document.add_paragraph()
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    heading.add_run("KERANGKA ACUAN KERJA/TERM OF REFERENCE")
-    format_paragraph(heading, size=12, color="092759")
-    output_heading = document.add_paragraph()
-    output_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    output_heading.add_run("KELUARAN (OUTPUT) TA {}".format(year))
-    format_paragraph(output_heading, size=12, color="092759")
-
-    code_parts = ro_code.split(".") if ro_code else []
-    metadata = [
-        ("Kegiatan", code_parts[0] if code_parts else "Sesuai RAB"),
-        ("Klasifikasi Rincian Output", ".".join(code_parts[:2]) if len(code_parts) >= 2 else "—"),
-        ("Rincian Output (RO)", "{} — {}".format(ro_code, activity) if ro_code else activity),
-        ("Tahun Anggaran", year),
-        ("Lokasi", location),
-        ("Sumber Data", sheet_name),
-    ]
-    if budget_data:
-        metadata.extend([
-            ("Pagu Penuh", format_rupiah(budget_data.get("Pagu Penuh"))),
-            ("Pagu Efektif", format_rupiah(budget_data.get("Pagu Efektif"))),
-            ("Pagu Terblokir (*)", format_rupiah(budget_data.get("Pagu Terblokir"))),
-            ("Realisasi", format_rupiah(budget_data.get("Realisasi"))),
-            ("Sisa Anggaran", format_rupiah(budget_data.get("Sisa anggaran"))),
-        ])
-    table = document.add_table(rows=0, cols=2)
-    table.style = "Table Grid"
-    for label, value in metadata:
-        cells = table.add_row().cells
-        cells[0].text = label
-        cells[1].text = value
-        for paragraph in cells[0].paragraphs:
-            format_paragraph(paragraph, bold=True, color="092759")
-        for paragraph in cells[1].paragraphs:
-            format_paragraph(paragraph, alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
-
-    for title_text, body in sections:
-        heading = document.add_heading(title_text, level=1)
-        heading.paragraph_format.space_before = Pt(3.05)
-        heading.paragraph_format.space_after = Pt(0)
-        format_paragraph(heading, size=12, bold=True, color="092759", alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
-        paragraph = document.add_paragraph(body)
-        format_paragraph(paragraph, alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
-    end = document.add_paragraph()
-    end.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    end.add_run("Draft untuk ditinjau dan dilengkapi\n\n\nPenanggung Jawab Kegiatan").italic = True
-    format_paragraph(end, alignment=WD_ALIGN_PARAGRAPH.RIGHT)
     output = io.BytesIO()
     document.save(output)
     return output.getvalue()
+
+
+def make_tor_docx(ro_code, budget_data, hierarchy, adjustments):
+    if not find_local_tor_template():
+        raise FileNotFoundError("Template TOR Word tidak ditemukan di folder aplikasi.")
+    if not budget_data:
+        raise ValueError("Pilih satu baris RO dari dashboard sebelum membuat TOR.")
+    return make_tor_from_local_template(
+        ro_code,
+        budget_data,
+        hierarchy,
+        adjustments,
+    )
 
 
 def render_tor(data):
@@ -1696,92 +1716,145 @@ def render_tor(data):
     if not data:
         st.info("Unggah RAB pada tab Dashboard untuk menghubungkan data dan membuat draft TOR.")
         return
-    sheet, analysis = data
-    if find_local_tor_template():
-        st.caption("Model TOR lokal digunakan langsung; file template tidak perlu diunggah.")
-    else:
-        st.caption("Template Word lokal tidak ditemukan; generator memakai model format TOR bawaan aplikasi.")
-    st.info(
-        "Bagian penerima manfaat, jadwal, indikator, biaya/manfaat, dan risiko yang ditandai kuning "
-        "perlu ditinjau untuk RO terpilih sebelum TOR digunakan."
+    _, analysis = data
+    template_path = find_local_tor_template()
+    if template_path is None:
+        st.error("Template TOR Word tidak ditemukan. Pastikan file [Template] TOR tersedia di folder aplikasi.")
+        return
+
+    ro_rows = [
+        row for row in analysis["rows"]
+        if row.get("Tingkat") == "RO" and row["Kode"]
+    ]
+    if not ro_rows:
+        st.warning("Belum ada baris Rincian Output (RO) yang dapat digunakan untuk membuat TOR.")
+        return
+
+    row_by_code = {row["Kode"]: row for row in ro_rows}
+    selected_code = st.selectbox(
+        "Pilih kode Rincian Output (RO)",
+        list(row_by_code),
+        key="tor_ro_code",
+        format_func=lambda code: "{} — {}".format(code, row_by_code[code]["Uraian"]),
     )
-    selected_row = None
-    if analysis.get("budget_comparison"):
-        ro_rows = [row for row in analysis["rows"] if row.get("Tingkat") == "RO" and row["Kode"]]
-        if ro_rows:
-            row_by_code = {row["Kode"]: row for row in ro_rows}
-            selected_code = st.selectbox(
-                "Pilih kode Rincian Output (RO)",
-                list(row_by_code),
-                key="tor_ro_code",
-                format_func=lambda code: "{} — {}".format(code, row_by_code[code]["Uraian"]),
-            )
-            selected_row = row_by_code[selected_code]
-            if st.session_state.get("_tor_activity_ro") != selected_code:
-                st.session_state["tor_activity"] = selected_row["Uraian"]
-                st.session_state["_tor_activity_ro"] = selected_code
-        else:
-            st.warning("Belum ada baris RO yang dapat digunakan untuk membuat TOR.")
-    default_activity = selected_row["Uraian"] if selected_row else infer_activity(analysis)
-    if "tor_activity" not in st.session_state:
-        st.session_state["tor_activity"] = default_activity
-    activity = st.text_input("Nama kegiatan", key="tor_activity")
-    location = st.text_input("Lokasi pelaksanaan", value="", key="tor_location")
-    year = st.text_input("Tahun pelaksanaan", value="2026", key="tor_year")
-    notes = st.text_area("Tujuan / catatan khusus", key="tor_notes")
-    st.caption("Sumber data: {} · {} baris bernilai. Draft menggunakan format A4, Times New Roman 11, spasi 1,5, dan paragraf rata kiri-kanan.".format(
-        sheet, len(analysis["rows"])
-    ))
-    if st.button("Buat draft TOR", type="primary"):
-        if not activity.strip():
-            st.error("Nama kegiatan perlu diisi.")
-        else:
-            sections = build_tor_sections(
-                activity.strip(),
-                location.strip() or "Lokasi pelaksanaan ditetapkan kemudian",
-                year.strip() or "2026",
-                notes.strip(),
-                analysis,
-                selected_row=selected_row,
-            )
-            st.session_state.tor_result = {
-                "activity": activity.strip(),
-                "location": location.strip() or "Lokasi pelaksanaan ditetapkan kemudian",
-                "year": year.strip() or "2026",
-                "sections": sections,
-                "ro_code": selected_row["Kode"] if selected_row else "",
-                "budget_data": selected_row,
-                "notes": notes.strip(),
-            }
-    result = st.session_state.get("tor_result")
-    if result:
-        st.markdown("### Draft TOR siap")
-        summary_columns = st.columns(3)
-        summary_columns[0].markdown("**Kegiatan**  \n{}".format(result["activity"]))
-        summary_columns[1].markdown("**Lokasi**  \n{}".format(result["location"]))
-        summary_columns[2].markdown("**Tahun**  \n{}".format(result["year"]))
-        with st.expander("Lihat isi lengkap TOR"):
-            st.markdown("#### KERANGKA ACUAN KERJA")
-            st.markdown("**Sumber data:** {}".format(sheet))
-            for section_title, body in result["sections"]:
-                st.markdown("**{}**".format(section_title))
-                st.write(body)
-        document = make_tor_docx(
-            result["activity"],
-            result["location"],
-            result["year"],
-            sheet,
-            result["sections"],
-            ro_code=result.get("ro_code", ""),
-            budget_data=result.get("budget_data"),
-            notes=result.get("notes", ""),
+    selected_row = row_by_code[selected_code]
+    hierarchy, descendants = get_tor_hierarchy(analysis, selected_row)
+    template = Document(str(template_path))
+    if len(template.tables) < 10:
+        st.error("Struktur tabel template TOR tidak sesuai dengan template yang didukung.")
+        return
+
+    identity = hashlib.sha1(selected_code.encode("utf-8")).hexdigest()[:10]
+    st.caption(
+        "TOR akan menggunakan format dan isi dokumen template. Program, Kegiatan, KRO, dan RO "
+        "diisi dari hierarki dashboard."
+    )
+    st.markdown("#### Identitas kegiatan dari dashboard")
+    hierarchy_columns = st.columns(4)
+    for column, level in zip(hierarchy_columns, ("PROGRAM", "KEGIATAN", "KRO", "RO")):
+        item = hierarchy.get(level)
+        column.markdown("**{}**".format(BUDGET_LEVEL_LABELS[level]))
+        column.write(
+            "{} — {}".format(item["Kode"], item["Uraian"])
+            if item else "Tidak tersedia pada data anggaran"
         )
-        safe_name = re.sub(r"[^a-z0-9]+", "-", result["activity"].lower()).strip("-") or "draft"
-        if result.get("ro_code"):
-            safe_name += "-" + re.sub(r"[^a-z0-9]+", "-", result["ro_code"].lower()).strip("-")
+
+    amount = tor_budget_amount(selected_row)
+    st.metric("Biaya yang diperlukan dari dashboard", format_rupiah(amount))
+    st.caption("Sumber biaya: pagu efektif; jika tidak tersedia, memakai pagu penuh.")
+
+    beneficiaries = docx_table_frame(template.tables[4])
+    schedule_columns = ["No", "Rincian Aktivitas"] + [
+        "Bulan {}".format(month) for month in range(1, 13)
+    ]
+    schedule = docx_table_frame(template.tables[5], first_data_row=2, column_names=schedule_columns)
+    kpi_output = docx_table_frame(template.tables[6])
+    kpi_outcome = docx_table_frame(template.tables[7])
+    cost_benefit = docx_table_frame(template.tables[8])
+    risks = docx_table_frame(template.tables[9])
+
+    with st.expander("Sesuaikan bagian TOR yang dapat diubah", expanded=True):
+        st.markdown("**Penerima Manfaat**")
+        beneficiaries = st.data_editor(
+            beneficiaries,
+            use_container_width=True,
+            hide_index=True,
+            key="tor_beneficiaries_{}".format(identity),
+        )
+        st.markdown("**Strategi Pencapaian Keluaran**")
+        strategy = st.text_area(
+            "Uraian strategi dan rincian sesuai RO",
+            value=tor_strategy_default(selected_row, descendants),
+            height=240,
+            key="tor_strategy_{}".format(identity),
+        )
+        st.markdown("**Kurun Waktu Pencapaian Keluaran**")
+        schedule = st.data_editor(
+            schedule,
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            key="tor_schedule_{}".format(identity),
+        )
+        st.markdown("**KPI Output**")
+        kpi_output = st.data_editor(
+            kpi_output,
+            use_container_width=True,
+            hide_index=True,
+            key="tor_kpi_output_{}".format(identity),
+        )
+        st.markdown("**KPI Outcome**")
+        kpi_outcome = st.data_editor(
+            kpi_outcome,
+            use_container_width=True,
+            hide_index=True,
+            key="tor_kpi_outcome_{}".format(identity),
+        )
+        st.markdown("**Analisis Biaya dan Manfaat**")
+        cost_benefit = st.data_editor(
+            cost_benefit,
+            use_container_width=True,
+            hide_index=True,
+            key="tor_cost_benefit_{}".format(identity),
+        )
+        st.markdown("**Manajemen Risiko**")
+        risks = st.data_editor(
+            risks,
+            use_container_width=True,
+            hide_index=True,
+            key="tor_risks_{}".format(identity),
+        )
+
+    adjustments = {
+        "beneficiaries": docx_frame_rows(beneficiaries),
+        "strategy": strategy,
+        "schedule": docx_frame_rows(schedule),
+        "kpi_output": docx_frame_rows(kpi_output),
+        "kpi_outcome": docx_frame_rows(kpi_outcome),
+        "cost_benefit": docx_frame_rows(cost_benefit),
+        "risks": docx_frame_rows(risks),
+    }
+    if st.button("Buat draft TOR dari template", type="primary"):
+        document = make_tor_docx(
+            selected_code,
+            selected_row,
+            hierarchy,
+            adjustments,
+        )
+        st.session_state["tor_result"] = {
+            "ro_code": selected_code,
+            "activity": selected_row["Uraian"],
+            "document": document,
+        }
+
+    result = st.session_state.get("tor_result")
+    if result and result.get("ro_code") == selected_code:
+        st.success("Draft TOR untuk RO {} siap diunduh.".format(selected_code))
+        safe_name = re.sub(r"[^a-z0-9]+", "-", selected_row["Uraian"].lower()).strip("-") or "draft"
+        safe_name += "-" + re.sub(r"[^a-z0-9]+", "-", selected_code.lower()).strip("-")
         st.download_button(
             "Unduh TOR dalam Word",
-            data=document,
+            data=result["document"],
             file_name="TOR-{}.docx".format(safe_name),
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )

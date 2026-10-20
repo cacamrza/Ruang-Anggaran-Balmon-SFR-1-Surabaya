@@ -7,6 +7,11 @@ from streamlit.testing.v1 import AppTest
 import streamlit_app
 
 
+def render_tor_test_app():
+    import streamlit_app as app_module
+    app_module.render_tor(("RAB", app_module.st.session_state["test_analysis"]))
+
+
 class StreamlitAppTests(unittest.TestCase):
     def test_dashboard_opens_without_login_or_signup(self):
         app = AppTest.from_file(streamlit_app.__file__).run(timeout=20)
@@ -151,59 +156,176 @@ A Perjalanan dinas 1.0 paket 1,500,000
             {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
         )
 
-    def test_tor_download_is_a_valid_word_document(self):
-        analysis = {
-            "sheet": "RAB Rev 9",
-            "rows": [{
-                "Uraian": "Monitoring",
-                "Pagu": 100000,
-                "Sisa anggaran": 20000,
-                "Baris": 2,
-                "Kode": "051",
-            }],
-        }
-        sections = streamlit_app.build_tor_sections(
-            "Monitoring", "Surabaya", "2026", "", analysis,
+    def test_tor_uses_template_and_edits_only_requested_sections(self):
+        workplan = streamlit_app.parse_rincian_kertas_text(["""
+RINCIAN KERTAS KERJA SATKER T.A. 2026
+ALOKASI Rp. 1,500,000
+059.09.GL Program utama 1.0 program 1,500,000
+7437 Kegiatan utama 1.0 kegiatan 1,500,000
+7437.BAH KRO utama 1.0 layanan 1,500,000
+7437.BAH.078 RO terpilih 1.0 layanan 1,500,000
+101 Komponen utama 1.0 paket 1,500,000
+A Subkomponen utama 1.0 paket 1,500,000
+521115 Detil perjalanan 1.0 paket 1,500,000
+- Rincian terblokir 100,000 100,000 *
+"""])
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 1,000,000 0 400,000 0 400,000 40.00 % 600,000
+BAH.078 RO terpilih 1,000,000 0 400,000 0 400,000 40.00 % 600,000
+"""])
+        analysis = streamlit_app.analyze_rows(
+            streamlit_app.combine_budget_documents([
+                ("Rincian Kertas Kerja", workplan),
+                ("Laporan FA Detail", financial),
+            ]),
+            "RAB",
         )
+        selected = next(row for row in analysis["rows"] if row["Tingkat"] == "RO")
+        hierarchy, descendants = streamlit_app.get_tor_hierarchy(analysis, selected)
+        template = Document(streamlit_app.find_local_tor_template())
+        beneficiaries = streamlit_app.docx_table_frame(template.tables[4])
+        beneficiaries.iloc[0, 0] = "Penerima manfaat RO terpilih"
+        schedule = streamlit_app.docx_table_frame(
+            template.tables[5],
+            first_data_row=2,
+            column_names=["No", "Rincian Aktivitas"] + ["Bulan {}".format(month) for month in range(1, 13)],
+        )
+        schedule.iloc[0, 1] = "Pelaksanaan RO terpilih"
+        schedule.iloc[0, 2] = "X"
+        output_kpi = streamlit_app.docx_table_frame(template.tables[6])
+        output_kpi.iloc[0, 0] = "KPI output RO terpilih"
+        outcome_kpi = streamlit_app.docx_table_frame(template.tables[7])
+        outcome_kpi.iloc[0, 0] = "KPI outcome RO terpilih"
+        adjustments = {
+            "beneficiaries": streamlit_app.docx_frame_rows(beneficiaries),
+            "strategy": "Strategi RO terpilih\n- Detil 521115 — Detil perjalanan",
+            "schedule": streamlit_app.docx_frame_rows(schedule),
+            "kpi_output": streamlit_app.docx_frame_rows(output_kpi),
+            "kpi_outcome": streamlit_app.docx_frame_rows(outcome_kpi),
+            "cost_benefit": [[
+                "Biaya RO 7437.BAH.078: Rp 1.000.000",
+                "Manfaat RO terpilih",
+            ]],
+            "risks": [[
+                "1", "Risiko terpilih", "Penyebab terpilih", "Dampak terpilih",
+                "Mitigasi terpilih", "PIC terpilih",
+            ]],
+        }
+
         content = streamlit_app.make_tor_docx(
-            "Monitoring",
-            "Surabaya",
-            "2026",
-            analysis["sheet"],
-            sections,
-            ro_code="7437.BAH.078",
-            budget_data={
-                "Pagu Penuh": 150000,
-                "Pagu Efektif": 140000,
-                "Pagu Terblokir": 10000,
-                "Realisasi": 80000,
-                "Sisa anggaran": 60000,
-            },
+            selected["Kode"],
+            selected,
+            hierarchy,
+            adjustments,
         )
         document = Document(io.BytesIO(content))
-        self.assertEqual(document.paragraphs[0].text, "TOR (TERM OF REFERENCE)")
-        self.assertIn("VII. Pembiayaan", [paragraph.text for paragraph in document.paragraphs])
-        table_text = [cell.text for table in document.tables for row in table.rows for cell in row.cells]
-        self.assertIn("Sumber Data", table_text)
-        self.assertIn("RAB Rev 9", table_text)
-        self.assertTrue(any(
-            "7437.BAH.078" in cell
-            for cell in table_text
+        template_original = Document(streamlit_app.find_local_tor_template())
+
+        self.assertEqual(len(document.tables), len(template_original.tables))
+        self.assertEqual(document.sections[0].page_width, template_original.sections[0].page_width)
+        self.assertEqual(document.sections[0].left_margin, template_original.sections[0].left_margin)
+        self.assertEqual(document.tables[0].cell(0, 1).text, "059.09.GL")
+        self.assertEqual(document.tables[0].cell(0, 2).text, "Program utama")
+        self.assertEqual(document.tables[0].cell(1, 1).text, "7437")
+        self.assertEqual(document.tables[0].cell(1, 2).text, "Kegiatan utama")
+        self.assertEqual(document.tables[0].cell(2, 1).text, "7437.BAH")
+        self.assertEqual(document.tables[0].cell(2, 2).text, "KRO utama")
+        self.assertEqual(document.tables[0].cell(3, 1).text, "7437.BAH.078")
+        self.assertEqual(document.tables[4].cell(1, 0).text, "Penerima manfaat RO terpilih")
+        self.assertEqual(document.tables[5].cell(2, 1).text, "Pelaksanaan RO terpilih")
+        self.assertEqual(document.tables[5].cell(2, 2).text, "X")
+        self.assertEqual(document.tables[6].cell(1, 0).text, "KPI output RO terpilih")
+        self.assertEqual(document.tables[7].cell(1, 0).text, "KPI outcome RO terpilih")
+        self.assertEqual(len(document.tables[8].rows), len(template_original.tables[8].rows))
+        self.assertEqual(document.tables[8].cell(1, 0).text, adjustments["cost_benefit"][0][0])
+        self.assertEqual(document.tables[8].cell(1, 1).text, "Manfaat RO terpilih")
+        self.assertEqual(
+            [[cell.text for cell in row.cells] for row in document.tables[8].rows[2:]],
+            [[cell.text for cell in row.cells] for row in template_original.tables[8].rows[2:]],
+        )
+        self.assertEqual(len(document.tables[9].rows), len(template_original.tables[9].rows))
+        self.assertEqual(document.tables[9].cell(1, 1).text, "Risiko terpilih")
+        self.assertEqual(
+            [[cell.text for cell in row.cells] for row in document.tables[9].rows[2:]],
+            [[cell.text for cell in row.cells] for row in template_original.tables[9].rows[2:]],
+        )
+        self.assertIn("Rp 1.000.000", next(
+            paragraph.text for paragraph in document.paragraphs
+            if paragraph.text.startswith("Biaya yang diperlukan untuk kegiatan ini sebesar")
         ))
+        self.assertIn("Strategi RO terpilih", [paragraph.text for paragraph in document.paragraphs])
+        self.assertTrue(descendants)
+        self.assertIn(
+            "Gambaran Umum",
+            [paragraph.text for paragraph in document.paragraphs],
+        )
+        def static_paragraphs(doc):
+            result = []
+            in_strategy = False
+            for paragraph in doc.paragraphs:
+                text = paragraph.text.strip()
+                if text == "Metode Pelaksanaan":
+                    in_strategy = True
+                    result.append(paragraph.text)
+                    continue
+                if text == "Tahapan dan Waktu Pelaksanaan":
+                    in_strategy = False
+                if in_strategy or text.startswith("Biaya yang diperlukan untuk kegiatan ini sebesar"):
+                    continue
+                result.append(paragraph.text)
+            return result
+
+        self.assertEqual(static_paragraphs(document), static_paragraphs(template_original))
+        for table_index in (1, 2, 3):
+            self.assertEqual(
+                [[cell.text for cell in row.cells] for row in document.tables[table_index].rows],
+                [[cell.text for cell in row.cells] for row in template_original.tables[table_index].rows],
+            )
+        for table_index in (4, 5, 6, 7, 8, 9):
+            self.assertEqual(
+                [cell._tc.tcPr.xml for cell in document.tables[table_index].rows[0].cells],
+                [cell._tc.tcPr.xml for cell in template_original.tables[table_index].rows[0].cells],
+            )
+
+    def test_tor_adjustment_controls_render_for_a_selected_ro(self):
+        workplan = streamlit_app.parse_rincian_kertas_text(["""
+RINCIAN KERTAS KERJA SATKER T.A. 2026
+ALOKASI Rp. 1,500,000
+059.09.GL Program utama 1.0 program 1,500,000
+7437 Kegiatan utama 1.0 kegiatan 1,500,000
+7437.BAH KRO utama 1.0 layanan 1,500,000
+7437.BAH.078 RO terpilih 1.0 layanan 1,500,000
+101 Komponen utama 1.0 paket 1,500,000
+A Subkomponen utama 1.0 paket 1,500,000
+521115 Detil perjalanan 1.0 paket 1,500,000
+"""])
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 1,000,000 0 400,000 0 400,000 40.00 % 600,000
+BAH.078 RO terpilih 1,000,000 0 400,000 0 400,000 40.00 % 600,000
+"""])
+        rows = streamlit_app.combine_budget_documents([
+            ("Rincian Kertas Kerja", workplan),
+            ("Laporan FA Detail", financial),
+        ])
+        analysis = streamlit_app.analyze_rows(rows, "RAB")
+        app = AppTest.from_function(render_tor_test_app)
+        app.session_state["test_analysis"] = analysis
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
         self.assertTrue(any(
-            "Pagu Efektif" in cell
-            for cell in table_text
+            item.label == "Pilih kode Rincian Output (RO)"
+            for item in app.selectbox
         ))
+        next(button for button in app.button if button.label == "Buat draft TOR dari template").click()
+        app.run(timeout=30)
+        self.assertEqual(len(app.exception), 0)
         self.assertTrue(any(
-            "Rp 140.000" in cell
-            for cell in table_text
+            item.label == "Unduh TOR dalam Word"
+            for item in app.get("download_button")
         ))
-        self.assertIn("TOR ini menjadi acuan pelaksanaan Monitoring pada tahun 2026, berdasarkan data pada sheet RAB Rev 9.", sections[0][1])
-        self.assertLess(max(len(body) for _, body in sections), 180)
-        body = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("TOR ini menjadi"))
-        self.assertEqual(body.alignment, 3)
-        self.assertEqual(body.paragraph_format.line_spacing, 1.5)
-        self.assertEqual(body.runs[0].font.name, "Times New Roman")
 
 
 if __name__ == "__main__":
