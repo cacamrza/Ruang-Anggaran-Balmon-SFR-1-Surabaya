@@ -49,6 +49,56 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(revision["sufficient_count"], 1)
         self.assertEqual(revision["shortfall"], 5)
 
+    def test_revision_treats_empty_original_side_as_new_zero_budget(self):
+        rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, None, None, None, "000001.", "Item baru", 100, 100],
+        ]
+
+        revision = streamlit_app.find_revision(rows)
+
+        self.assertEqual(revision["changes"][0]["Pagu semula"], 0)
+        self.assertEqual(revision["changes"][0]["Pagu menjadi"], 100)
+        self.assertEqual(revision["pagu_semula_total"], 0)
+        self.assertEqual(revision["pagu_menjadi_total"], 100)
+
+    def test_remaining_equal_to_increase_is_not_sufficient(self):
+        rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih", "Sisa Anggaran"],
+            [None, "059.GL", "Program utama", 100, "059.GL", "Program utama", 150, 50, 50],
+        ]
+
+        change = streamlit_app.find_revision(rows)["changes"][0]
+
+        self.assertEqual(change["Kecukupan"], "Sisa tidak lebih besar")
+        self.assertEqual(change["Sisa setelah kenaikan"], 0)
+
+    def test_dashboard_shows_revision_before_after_and_residual(self):
+        rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih", "Sisa Anggaran"],
+            [None, "059.GL", "Program utama", 100, "059.GL", "Program utama", 150, 50, 75],
+        ]
+        analysis = streamlit_app.analyze_rows(rows, "RAB revisi")
+        app = AppTest.from_function(render_dashboard_test_app)
+        app.session_state["test_analysis"] = analysis
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any(item.label == "Pagu semula · baris berubah" and item.value == "Rp 100" for item in app.metric))
+        self.assertTrue(any(item.label == "Pagu menjadi · baris berubah" and item.value == "Rp 150" for item in app.metric))
+        self.assertTrue(any(item.label == "Selisih bersih" and item.value == "Rp 50" for item in app.metric))
+        self.assertTrue(any(item.label == "Sisa mencukupi" and item.value == "1" for item in app.metric))
+        change_table = next(
+            item.value for item in app.dataframe
+            if "Pagu semula" in item.value.columns
+        )
+        self.assertIn("Sisa anggaran", change_table.columns)
+        self.assertIn("Sisa setelah kenaikan", change_table.columns)
+        self.assertEqual(change_table.iloc[0]["Sisa setelah kenaikan"], 25)
+
     def test_revision_detects_changes_at_each_budget_hierarchy_level(self):
         rows = [
             ["", "Semula", None, None, "Menjadi", None, None, None],
@@ -70,6 +120,9 @@ class StreamlitAppTests(unittest.TestCase):
             {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
         )
         self.assertEqual(revision["increase_total"], 50)
+        self.assertEqual(revision["pagu_semula_total"], 100)
+        self.assertEqual(revision["pagu_menjadi_total"], 150)
+        self.assertEqual(revision["net_change_total"], 50)
 
     def test_fa_detail_rows_cover_all_levels_and_match_revision_changes(self):
         financial = streamlit_app.parse_fa_text(["""
@@ -118,6 +171,7 @@ BAH.078 RO 1,000,000 0 200,000 0 200,000 20.00 % 800,000
         self.assertEqual(component["Kecukupan"], "Sisa cukup")
         self.assertEqual(account["Sisa anggaran"], 400000)
         self.assertEqual(account["Kecukupan"], "Sisa cukup")
+        self.assertEqual(account["Sisa setelah kenaikan"], 399950)
 
     def test_dashboard_analysis_prepares_rows_and_categories(self):
         rows = [

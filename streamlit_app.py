@@ -528,6 +528,39 @@ def normalize_hierarchy_code(level, code):
     return code
 
 
+def summarize_revision_changes(changes):
+    leaf_changes = [
+        row for row in changes
+        if not any(
+            len(other.get("_path", ())) > len(row.get("_path", ()))
+            and other.get("_path", ())[:len(row.get("_path", ()))] == row.get("_path", ())
+            for other in changes
+        )
+    ]
+    leaf_increases = [row for row in leaf_changes if row["Selisih"] > 0]
+    insufficient = [row for row in leaf_increases if row["_status"] == "short"]
+
+    def total_if_complete(key):
+        values = [row.get(key) for row in leaf_changes]
+        if not values or any(value is None for value in values):
+            return None
+        return sum(values)
+
+    return {
+        "increase_count": len(leaf_increases),
+        "increase_total": sum(row["Selisih"] for row in leaf_increases),
+        "decrease_total": sum(abs(row["Selisih"]) for row in leaf_changes if row["Selisih"] < 0),
+        "net_change_total": sum(row["Selisih"] for row in leaf_changes),
+        "pagu_semula_total": total_if_complete("Pagu semula"),
+        "pagu_menjadi_total": total_if_complete("Pagu menjadi"),
+        "changed_line_count": len(leaf_changes),
+        "sufficient_count": sum(row["_status"] == "enough" for row in leaf_increases),
+        "insufficient_count": len(insufficient),
+        "unknown_count": sum(row["_status"] == "unknown" for row in leaf_increases),
+        "shortfall": sum(row["Selisih"] - row["Sisa anggaran"] for row in insufficient),
+    }
+
+
 def budget_rows_with_paths(rows):
     paths = []
     current = {}
@@ -803,6 +836,12 @@ def find_revision(rows):
         revised_code = clean_text(get(layout["revised_code"]))
         code = revised_code or original_code
         level = budget_level_for_code(code) if code else None
+        original_amount = to_number(get(layout["original_amount"]))
+        revised_amount = to_number(get(layout["revised_amount"]))
+        if original_amount is None and not original_code and not original_desc and revised_desc:
+            original_amount = 0
+        if revised_amount is None and not revised_code and not revised_desc and original_desc:
+            revised_amount = 0
         if code and level is None:
             original_code = ""
             revised_code = ""
@@ -813,8 +852,6 @@ def find_revision(rows):
                 current_hierarchy.pop(descendant, None)
         if not code and (not original_desc and not revised_desc):
             continue
-        original_amount = to_number(get(layout["original_amount"]))
-        revised_amount = to_number(get(layout["revised_amount"]))
         delta = to_number(get(layout["delta"]))
         calculated_delta = (
             revised_amount - original_amount
@@ -826,7 +863,7 @@ def find_revision(rows):
         if delta is None or delta == 0:
             continue
         remaining = to_number(get(layout["remaining"]))
-        status = "decrease" if delta < 0 else "unknown" if remaining is None else "enough" if remaining >= delta else "short"
+        status = "decrease" if delta < 0 else "unknown" if remaining is None else "enough" if remaining > delta else "short"
         change_level = BUDGET_LEVEL_LABELS.get(level, "Rincian item" if current_hierarchy else "Rincian")
         hierarchy_path = tuple((item, current_hierarchy[item]) for item in level_order if item in current_hierarchy)
         if not code and revised_desc:
@@ -840,35 +877,24 @@ def find_revision(rows):
             "Pagu menjadi": revised_amount,
             "Selisih": delta,
             "Sisa anggaran": remaining,
+            "Sisa setelah kenaikan": remaining - delta if delta > 0 and remaining is not None else None,
             "Tingkat": change_level,
             "_path": hierarchy_path,
-            "Kecukupan": {"decrease": "Pengurangan", "unknown": "Cek sisa", "enough": "Sisa cukup", "short": "Sisa kurang"}[status],
+            "Kecukupan": {
+                "decrease": "Pengurangan",
+                "unknown": "Cek sisa",
+                "enough": "Sisa cukup",
+                "short": "Sisa tidak lebih besar",
+            }[status],
             "_status": status,
         })
     increases = [row for row in changes if row["Selisih"] > 0]
     decreases = [row for row in changes if row["Selisih"] < 0]
-    leaf_changes = [
-        row for row in changes
-        if not any(
-            len(other["_path"]) > len(row["_path"])
-            and other["_path"][:len(row["_path"])] == row["_path"]
-            for other in changes
-        )
-    ]
-    leaf_increases = [row for row in leaf_changes if row["Selisih"] > 0]
-    insufficient = [row for row in leaf_increases if row["_status"] == "short"]
-    unknown = [row for row in leaf_increases if row["_status"] == "unknown"]
     return {
         "changes": changes,
         "increases": increases,
         "decreases": decreases,
-        "increase_count": len(leaf_increases),
-        "increase_total": sum(row["Selisih"] for row in leaf_increases),
-        "decrease_total": sum(abs(row["Selisih"]) for row in leaf_changes if row["Selisih"] < 0),
-        "sufficient_count": sum(row["_status"] == "enough" for row in leaf_increases),
-        "insufficient_count": len(insufficient),
-        "unknown_count": len(unknown),
-        "shortfall": sum(row["Selisih"] - row["Sisa anggaran"] for row in insufficient),
+        **summarize_revision_changes(changes),
     }
 
 
@@ -1567,35 +1593,24 @@ def apply_fa_remaining_to_revision(revision, fa_analyses):
 
         remaining = candidates[0][0].get("Sisa anggaran") if len(candidates) == 1 else None
         change["Sisa anggaran"] = remaining
-        status = "unknown" if remaining is None else "enough" if remaining >= change["Selisih"] else "short"
+        change["Sisa setelah kenaikan"] = (
+            remaining - change["Selisih"]
+            if change["Selisih"] > 0 and remaining is not None
+            else None
+        )
+        status = "unknown" if remaining is None else "enough" if remaining > change["Selisih"] else "short"
         change["_status"] = status
         change["Kecukupan"] = {
             "enough": "Sisa cukup",
-            "short": "Sisa kurang",
+            "short": "Sisa tidak lebih besar",
             "unknown": "Sisa FA tidak ditemukan",
         }[status]
 
     changes = revision["changes"]
-    leaf_changes = [
-        row for row in changes
-        if not any(
-            len(other.get("_path", ())) > len(row.get("_path", ()))
-            and other.get("_path", ())[:len(row.get("_path", ()))] == row.get("_path", ())
-            for other in changes
-        )
-    ]
-    leaf_increases = [row for row in leaf_changes if row["Selisih"] > 0]
-    insufficient = [row for row in leaf_increases if row["_status"] == "short"]
     revision.update({
         "increases": [row for row in changes if row["Selisih"] > 0],
         "decreases": [row for row in changes if row["Selisih"] < 0],
-        "increase_count": len(leaf_increases),
-        "increase_total": sum(row["Selisih"] for row in leaf_increases),
-        "decrease_total": sum(abs(row["Selisih"]) for row in leaf_changes if row["Selisih"] < 0),
-        "sufficient_count": sum(row["_status"] == "enough" for row in leaf_increases),
-        "insufficient_count": len(insufficient),
-        "unknown_count": sum(row["_status"] == "unknown" for row in leaf_increases),
-        "shortfall": sum(row["Selisih"] - row["Sisa anggaran"] for row in insufficient),
+        **summarize_revision_changes(changes),
     })
 
 
@@ -1897,20 +1912,50 @@ def render_dashboard(data):
     if revision:
         st.markdown("### Perubahan RAB & kecukupan dana")
         if revision["insufficient_count"]:
-            st.warning("{} kenaikan pada tingkat terendah perlu ditinjau: sisa lebih kecil dari selisih.".format(revision["insufficient_count"]))
+            st.warning("{} kenaikan pada tingkat terendah perlu ditinjau: sisa FA tidak lebih besar dari selisih.".format(revision["insufficient_count"]))
         elif revision["unknown_count"]:
             st.info("{} kenaikan pada tingkat terendah belum dapat dibandingkan karena nilai sisa tidak ditemukan.".format(revision["unknown_count"]))
         elif revision["increases"]:
             st.success("Sisa anggaran pada semua kenaikan tingkat terendah yang terbaca mencukupi.")
         else:
             st.info("Tidak ada kenaikan pagu yang terdeteksi.")
+        if revision.get("pagu_semula_total") is None or revision.get("pagu_menjadi_total") is None:
+            st.info("Total pagu semula/menjadi pada baris perubahan belum lengkap; periksa nilai pada tabel.")
+        metric_columns = st.columns(5)
+        metric_columns[0].metric(
+            "Pagu semula · baris berubah",
+            format_compact_rupiah(revision.get("pagu_semula_total")),
+        )
+        metric_columns[1].metric(
+            "Pagu menjadi · baris berubah",
+            format_compact_rupiah(revision.get("pagu_menjadi_total")),
+        )
+        metric_columns[2].metric(
+            "Selisih bersih",
+            format_compact_rupiah(revision.get("net_change_total")),
+        )
+        metric_columns[3].metric(
+            "Total kenaikan",
+            format_compact_rupiah(revision["increase_total"]),
+        )
+        metric_columns[4].metric(
+            "Total penurunan",
+            format_compact_rupiah(revision["decrease_total"]),
+        )
         rev1, rev2, rev3, rev4 = st.columns(4)
-        rev1.metric("Total kenaikan", format_compact_rupiah(revision["increase_total"]))
-        rev2.metric("Sisa mencukupi", revision["sufficient_count"])
-        rev3.metric("Sisa lebih kecil", revision["insufficient_count"])
+        rev1.metric("Sisa mencukupi", revision["sufficient_count"])
+        rev2.metric("Sisa tidak lebih besar", revision["insufficient_count"])
+        rev3.metric("Sisa FA tidak ditemukan", revision["unknown_count"])
         rev4.metric("Kekurangan terhitung", format_compact_rupiah(revision["shortfall"]))
+        st.caption(
+            "Ringkasan pagu hanya memakai baris perubahan pada tingkat terendah agar perubahan induk-anak tidak dihitung ganda. "
+            "Kenaikan dinilai cukup hanya jika sisa FA lebih besar dari selisih (sisa setelah kenaikan > Rp0)."
+        )
         if revision["changes"]:
             revision_frame = pd.DataFrame(revision["changes"]).drop(columns=["_status", "_path"], errors="ignore")
+            has_fa_source = any("fa detail" in source.casefold() for source in analysis.get("sources", []))
+            remaining_label = "Sisa FA" if has_fa_source else "Sisa anggaran"
+            revision_frame = revision_frame.rename(columns={"Sisa anggaran": remaining_label})
             st.dataframe(revision_frame, use_container_width=True, hide_index=True)
 
     if categories:
