@@ -1150,7 +1150,7 @@ def render_auth():
                         column.image(str(path), use_container_width=True)
                 st.markdown("<h1>RAB &amp; TOR</h1>", unsafe_allow_html=True)
                 st.markdown("Masuk untuk membaca anggaran, melihat insight, dan menyusun draft TOR.")
-                st.caption("Masuk dengan email dan kata sandi. Pendaftaran akun baru hanya dapat dilakukan dari jaringan internal Balmon; akun tersimpan untuk login berikutnya.")
+                st.caption("Masuk dengan email dan kata sandi. Pendaftaran akun baru dibatasi berdasarkan alamat IP jaringan kantor, bukan nama Wi-Fi; akun tersimpan untuk login berikutnya.")
 
             with form_panel:
                 mode = st.radio("Akses demo", ("Masuk", "Daftar"), horizontal=True, label_visibility="collapsed")
