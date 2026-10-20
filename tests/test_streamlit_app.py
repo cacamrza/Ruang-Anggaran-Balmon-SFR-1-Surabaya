@@ -1,17 +1,21 @@
 import io
-import os
-import tempfile
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 from docx import Document
+from streamlit.testing.v1 import AppTest
 
 import streamlit_app
 
 
 class StreamlitAppTests(unittest.TestCase):
+    def test_dashboard_opens_without_login_or_signup(self):
+        app = AppTest.from_file(streamlit_app.__file__).run(timeout=20)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual([title.value for title in app.title], ["Dashboard RAB & Generator TOR"])
+        self.assertEqual(len(app.get("file_uploader")), 1)
+        self.assertFalse(any("Masuk" in item.value or "Daftar" in item.value for item in app.markdown))
+
     def test_to_number_handles_indonesian_and_plain_amounts(self):
         self.assertEqual(streamlit_app.to_number("Rp 1.234.567"), 1234567)
         self.assertEqual(streamlit_app.to_number("1,234,567"), 1234567)
@@ -21,65 +25,6 @@ class StreamlitAppTests(unittest.TestCase):
     def test_compact_rupiah_uses_short_indonesian_units(self):
         self.assertEqual(streamlit_app.format_compact_rupiah(17_100_000_000), "17,1 M")
         self.assertEqual(streamlit_app.format_compact_rupiah(1_260_000), "1,3 jt")
-
-    def test_account_can_log_in_after_a_new_database_connection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database_path = Path(directory) / ".data" / "accounts.sqlite3"
-            with patch.object(streamlit_app, "ACCOUNT_DB_PATH", database_path):
-                salt, digest = streamlit_app.hash_password("password123")
-                self.assertTrue(streamlit_app.create_account("staff@example.com", salt, digest))
-
-                account = streamlit_app.get_account("staff@example.com")
-                self.assertIsNotNone(account)
-                self.assertTrue(streamlit_app.password_matches("password123", account["salt"], account["digest"]))
-                self.assertFalse(streamlit_app.password_matches("wrong-password", account["salt"], account["digest"]))
-                self.assertFalse(streamlit_app.create_account("staff@example.com", salt, digest))
-
-    def test_signup_is_limited_to_configured_office_network_ranges(self):
-        allowed, _ = streamlit_app.signup_network_status(
-            "10.20.30.45",
-            "10.20.30.0/24,198.51.100.7/32",
-        )
-        self.assertTrue(allowed)
-
-        guest_allowed, message = streamlit_app.signup_network_status(
-            "10.20.31.45",
-            "10.20.30.0/24",
-        )
-        self.assertFalse(guest_allowed)
-        self.assertIn("Wi-Fi tamu", message)
-
-        unconfigured, message = streamlit_app.signup_network_status("10.20.30.45", "")
-        self.assertFalse(unconfigured)
-        self.assertIn("SIGNUP_ALLOWED_CIDRS", message)
-
-    def test_signup_uses_streamlit_secret_when_environment_is_unset(self):
-        fake_streamlit = SimpleNamespace(
-            context=SimpleNamespace(ip_address="198.51.100.7"),
-            secrets={"SIGNUP_ALLOWED_CIDRS": "198.51.100.0/24"},
-        )
-        with patch.dict(os.environ):
-            os.environ.pop("SIGNUP_ALLOWED_CIDRS", None)
-            with patch.object(streamlit_app, "st", fake_streamlit):
-                self.assertEqual(streamlit_app.get_signup_network_status(), (True, ""))
-
-    def test_signup_environment_setting_overrides_streamlit_secret(self):
-        fake_streamlit = SimpleNamespace(
-            context=SimpleNamespace(ip_address="198.51.100.7"),
-            secrets={"SIGNUP_ALLOWED_CIDRS": "10.20.30.0/24"},
-        )
-        with patch.dict(os.environ, {"SIGNUP_ALLOWED_CIDRS": "198.51.100.0/24"}):
-            with patch.object(streamlit_app, "st", fake_streamlit):
-                self.assertEqual(streamlit_app.get_signup_network_status(), (True, ""))
-
-    def test_signup_denies_access_when_visitor_ip_is_unavailable(self):
-        fake_streamlit = SimpleNamespace(context=SimpleNamespace(ip_address=None))
-        with patch.dict(os.environ, {"SIGNUP_ALLOWED_CIDRS": "192.168.100.0/24"}):
-            with patch.object(streamlit_app, "st", fake_streamlit):
-                allowed, message = streamlit_app.get_signup_network_status()
-
-        self.assertFalse(allowed)
-        self.assertIn("Alamat IP pengunjung", message)
 
     def test_revision_compares_remaining_to_increase(self):
         rows = [

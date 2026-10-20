@@ -1,18 +1,11 @@
 import hashlib
-import hmac
-import ipaddress
 import io
-import os
 import re
-import secrets
-import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from streamlit.errors import StreamlitSecretNotFoundError
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.shared import Inches, Pt, RGBColor
@@ -21,8 +14,6 @@ st.set_page_config(page_title="Ruang Anggaran — Dashboard RAB & TOR",page_icon
 ROOT = Path(__file__).resolve().parent
 COLORS = ["#092759", "#087cb5", "#3d91b8", "#7a9bb5", "#a8bbc9", "#c3ccd4"]
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024
-ACCOUNT_DB_PATH = ROOT / ".data" / "accounts.sqlite3"
-OFFICE_SIGNUP_CIDRS = "192.168.100.0/24"
 BUDGET_HEADERS = [
     "_Jenis",
     "Kode Anggaran",
@@ -1023,185 +1014,6 @@ def format_compact_rupiah(value):
     return number + suffix
 
 
-def hash_password(password, salt=None):
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 180000)
-    return salt.hex(), digest.hex()
-
-
-def password_matches(password, salt_hex, digest_hex):
-    _, candidate = hash_password(password, bytes.fromhex(salt_hex))
-    return hmac.compare_digest(candidate, digest_hex)
-
-
-@contextmanager
-def account_connection():
-    ACCOUNT_DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ACCOUNT_DB_PATH.parent.chmod(0o700)
-    connection = sqlite3.connect(ACCOUNT_DB_PATH, timeout=10)
-    try:
-        with connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS accounts (
-                    email TEXT PRIMARY KEY,
-                    salt TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            yield connection
-    finally:
-        connection.close()
-        ACCOUNT_DB_PATH.chmod(0o600)
-
-
-def get_account(email):
-    with account_connection() as connection:
-        row = connection.execute(
-            "SELECT salt, password_hash FROM accounts WHERE email = ?",
-            (email,),
-        ).fetchone()
-    if row is None:
-        return None
-    return {"salt": row[0], "digest": row[1]}
-
-
-def create_account(email, salt, digest):
-    with account_connection() as connection:
-        cursor = connection.execute(
-            "INSERT OR IGNORE INTO accounts (email, salt, password_hash) VALUES (?, ?, ?)",
-            (email, salt, digest),
-        )
-        return cursor.rowcount == 1
-
-
-def signup_network_status(client_ip, allowed_cidrs):
-    if not allowed_cidrs:
-        return False, "Pendaftaran belum diaktifkan. Admin perlu mengatur SIGNUP_ALLOWED_CIDRS ke jaringan internal kantor."
-    if not client_ip:
-        return False, "Alamat IP pengunjung tidak dapat diverifikasi. Pendaftaran hanya tersedia melalui jaringan kantor yang diizinkan."
-    try:
-        address = ipaddress.ip_address(client_ip)
-        networks = [ipaddress.ip_network(value.strip(), strict=False) for value in allowed_cidrs.split(",") if value.strip()]
-    except ValueError:
-        return False, "Konfigurasi jaringan pendaftaran tidak valid. Hubungi admin aplikasi."
-    if not networks:
-        return False, "Pendaftaran belum diaktifkan. Admin perlu mengatur SIGNUP_ALLOWED_CIDRS ke jaringan internal kantor."
-    if any(address in network for network in networks):
-        return True, ""
-    return False, "Pendaftaran hanya tersedia dari jaringan kantor Balmon yang diizinkan. Wi-Fi tamu atau jaringan lain ditolak."
-
-
-def get_signup_network_status():
-    if "SIGNUP_ALLOWED_CIDRS" in os.environ:
-        allowed_cidrs = os.environ["SIGNUP_ALLOWED_CIDRS"]
-    else:
-        try:
-            allowed_cidrs = st.secrets.get("SIGNUP_ALLOWED_CIDRS", OFFICE_SIGNUP_CIDRS)
-        except StreamlitSecretNotFoundError:
-            allowed_cidrs = OFFICE_SIGNUP_CIDRS
-    client_ip = getattr(st.context, "ip_address", None)
-    return signup_network_status(client_ip, allowed_cidrs)
-
-
-def logout():
-    for key in (
-        "authenticated_email", "upload_name", "sheets", "selected_sheet", "tor_result",
-        "tor_activity", "tor_location", "tor_year", "tor_notes", "tor_ro_code", "_tor_activity_ro",
-        "pending_signup",
-    ):
-        st.session_state.pop(key, None)
-
-
-def render_auth():
-    st.markdown(
-        """
-        <style>
-        .stApp { background: #f5f8fb; }
-        .st-key-auth_card { width: min(100%, 1100px); margin: clamp(1.5rem, 6vh, 4rem) auto 0;
-            padding: clamp(1.5rem, 4vw, 3rem);
-            background: #1e1e24; border: 1px solid #303038; border-radius: 12px; }
-        .st-key-auth_card [data-testid="stMarkdownContainer"] h1 { color: #fff; font-size: clamp(2rem, 3vw, 2.7rem); }
-        .st-key-auth_card [data-testid="stMarkdownContainer"] p,
-        .st-key-auth_card [data-testid="stWidgetLabel"] p,
-        .st-key-auth_card [data-testid="stCaptionContainer"] p { color: #c5c7ce; }
-        .st-key-auth_card [data-testid="stTextInput"] input { background: #38383f; color: #f4f5f7; border-color: #4a4a53; }
-        .st-key-auth_card [data-testid="stRadio"] label { color: #f2f3f5; }
-        .st-key-auth_card [data-testid="stBaseButton-primary"] { background: #087cb5; border-color: #087cb5; }
-        .st-key-auth_card [data-testid="stForm"] { border: 0; padding: 0; }
-        @media (max-width: 700px) {
-            .st-key-auth_card { margin-top: 1rem; padding: 1.25rem; }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    left, center, right = st.columns([0.1, 4, 0.1])
-    with center:
-        with st.container(key="auth_card"):
-            brand, form_panel = st.columns([0.9, 1.1], gap="large", vertical_alignment="center")
-            with brand:
-                logos = st.columns([1, 1, 1], gap="small")
-                for column, filename in zip(logos, ("balmon.png", "djid.png", "komdigi.png")):
-                    path = ROOT / "image" / filename
-                    if path.exists():
-                        column.image(str(path), use_container_width=True)
-                st.markdown("<h1>RAB &amp; TOR</h1>", unsafe_allow_html=True)
-                st.markdown("Masuk untuk membaca anggaran, melihat insight, dan menyusun draft TOR.")
-                st.caption("Masuk dengan email dan kata sandi. Pendaftaran akun baru dibatasi berdasarkan alamat IP jaringan kantor, bukan nama Wi-Fi; akun tersimpan untuk login berikutnya.")
-
-            with form_panel:
-                mode = st.radio("Akses demo", ("Masuk", "Daftar"), horizontal=True, label_visibility="collapsed")
-                if mode == "Masuk":
-                    with st.form("login_form"):
-                        email = st.text_input("Email", key="login_email", autocomplete="email")
-                        password = st.text_input("Kata sandi", type="password", key="login_password")
-                        submitted = st.form_submit_button("Masuk", type="primary", use_container_width=True)
-                    if submitted:
-                        normalized_email = email.strip().lower()
-                        account = get_account(normalized_email)
-                        if account and password_matches(password, account["salt"], account["digest"]):
-                            st.session_state.authenticated_email = normalized_email
-                            st.rerun()
-                        else:
-                            st.error("Email atau kata sandi tidak cocok.")
-                else:
-                    allowed, network_message = get_signup_network_status()
-                    if not allowed:
-                        st.info(network_message)
-                    with st.form("signup_form"):
-                        email = st.text_input("Email", key="signup_email", autocomplete="email")
-                        password = st.text_input("Kata sandi", type="password", key="signup_password")
-                        confirm_password = st.text_input("Ulangi kata sandi", type="password", key="signup_confirm_password")
-                        submitted = st.form_submit_button(
-                            "Buat akun",
-                            type="primary",
-                            use_container_width=True,
-                            disabled=not allowed,
-                        )
-                    if submitted:
-                        normalized_email = email.strip().lower()
-                        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email):
-                            st.error("Masukkan alamat email yang valid.")
-                        elif len(password) < 8:
-                            st.error("Kata sandi minimal 8 karakter.")
-                        elif password != confirm_password:
-                            st.error("Kata sandi dan konfirmasi tidak sama.")
-                        elif get_account(normalized_email):
-                            st.error("Email sudah terdaftar. Silakan masuk dengan akun tersebut.")
-                        else:
-                            salt, digest = hash_password(password)
-                            if create_account(normalized_email, salt, digest):
-                                st.session_state.authenticated_email = normalized_email
-                                st.session_state.pop("pending_signup", None)
-                                st.success("Akun berhasil dibuat. Anda sudah masuk.")
-                                st.rerun()
-                            else:
-                                st.error("Email sudah terdaftar. Silakan masuk dengan akun tersebut.")
-
-
 def load_analysis():
     uploads = st.file_uploader(
         "Unggah file anggaran",
@@ -1880,10 +1692,6 @@ def main():
         """,
         unsafe_allow_html=True,
     )
-    if not st.session_state.get("authenticated_email"):
-        render_auth()
-        return
-
     with st.sidebar:
         st.markdown("## Ruang Anggaran")
         logo_columns = st.columns(3)
@@ -1892,10 +1700,6 @@ def main():
             if path.exists():
                 column.image(str(path), use_container_width=True)
         st.caption("Balai Monitor SFR Kelas I Surabaya")
-        st.write(st.session_state.authenticated_email)
-        if st.button("Keluar", use_container_width=True):
-            logout()
-            st.rerun()
         st.divider()
         st.caption("Draft dan insight perlu ditinjau sebelum digunakan resmi.")
 
