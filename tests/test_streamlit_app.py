@@ -173,6 +173,94 @@ BAH.078 RO 1,000,000 0 200,000 0 200,000 20.00 % 800,000
         self.assertEqual(account["Kecukupan"], "Sisa cukup")
         self.assertEqual(account["Sisa setelah kenaikan"], 399950)
 
+    def test_combined_upload_matches_item_change_to_fa_description_with_quantities(self):
+        revision_rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.GL", "Program", 500, "059.GL", "Program", 500, 0],
+            [None, "7437", "Kegiatan", 500, "7437", "Kegiatan", 500, 0],
+            [None, "7437.BAH", "KRO", 500, "7437.BAH", "KRO", 500, 0],
+            [None, "7437.BAH.078", "RO", 500, "7437.BAH.078", "RO", 500, 0],
+            [None, "100", "Komponen", 500, "100", "Komponen", 500, 0],
+            [None, "A", "Subkomponen", 500, "A", "Subkomponen", 500, 0],
+            [None, "521115", "Belanja honor", 500, "521115", "Belanja honor", 500, 0],
+            [None, None, "- Item detail (5 orang x 2 hari)", 400, None, "- Item detail (8 orang x 2 hari)", 450, 50],
+        ]
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 500 0 100 0 100 20.00 % 400
+GL Program 500 0 100 0 100 20.00 % 400
+GL.7437 Kegiatan 500 0 100 0 100 20.00 % 400
+BAH KRO 500 0 100 0 100 20.00 % 400
+BAH.078 RO 500 0 100 0 100 20.00 % 400
+100 Komponen 500 0 100 0 100 20.00 % 400
+100.0A Subkomponen 500 0 100 0 100 20.00 % 400
+521115 Belanja honor 500 0 100 0 100 20.00 % 400
+000001. Item detail 500 0 100 0 100 20.00 % 400
+"""])
+
+        combined = streamlit_app.analyze_combined_tables([
+            ("Revisi Excel", revision_rows),
+            ("Laporan FA Detail", financial),
+        ])
+        item = next(row for row in combined["revision"]["changes"] if row["Tingkat"] == "Rincian item")
+
+        self.assertEqual(item["Pagu semula"], 400)
+        self.assertEqual(item["Pagu menjadi"], 450)
+        self.assertEqual(item["Selisih"], 50)
+        self.assertEqual(item["Sisa anggaran"], 400)
+        self.assertEqual(item["Sisa setelah kenaikan"], 350)
+        self.assertEqual(item["Kecukupan"], "Sisa cukup")
+        self.assertEqual(item["Basis pasangan FA"], "Uraian rincian cocok")
+        self.assertEqual(item["Sumber Sisa FA"], "Laporan FA Detail")
+
+    def test_combined_upload_uses_nearest_fa_ancestor_when_item_is_not_reported(self):
+        revision_rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.GL", "Program", 500, "059.GL", "Program", 500, 0],
+            [None, "7437", "Kegiatan", 500, "7437", "Kegiatan", 500, 0],
+            [None, "7437.BAH", "KRO", 500, "7437.BAH", "KRO", 500, 0],
+            [None, "7437.BAH.078", "RO", 500, "7437.BAH.078", "RO", 500, 0],
+            [None, "100", "Komponen", 500, "100", "Komponen", 500, 0],
+            [None, "A", "Subkomponen", 500, "A", "Subkomponen", 500, 0],
+            [None, "521115", "Belanja honor", 500, "521115", "Belanja honor", 500, 0],
+            [None, None, "- Rincian baru", 400, None, "- Rincian baru", 450, 50],
+        ]
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 500 0 100 0 100 20.00 % 400
+GL Program 500 0 100 0 100 20.00 % 400
+GL.7437 Kegiatan 500 0 100 0 100 20.00 % 400
+BAH KRO 500 0 100 0 100 20.00 % 400
+BAH.078 RO 500 0 100 0 100 20.00 % 400
+100 Komponen 500 0 100 0 100 20.00 % 400
+100.0A Subkomponen 500 0 100 0 100 20.00 % 400
+521115 Belanja honor 500 0 100 0 100 20.00 % 400
+"""])
+
+        combined = streamlit_app.analyze_combined_tables([
+            ("Revisi Excel", revision_rows),
+            ("Laporan FA Detail", financial),
+        ])
+        item = next(row for row in combined["revision"]["changes"] if row["Tingkat"] == "Rincian item")
+
+        self.assertEqual(item["Sisa anggaran"], 400)
+        self.assertEqual(item["Basis pasangan FA"], "Sisa FA pada detil belanja")
+        self.assertEqual(item["Kecukupan"], "Sisa cukup")
+
+        app = AppTest.from_function(render_dashboard_test_app)
+        app.session_state["test_analysis"] = combined
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        change_table = next(
+            frame.value for frame in app.dataframe
+            if "Pagu semula" in frame.value.columns
+        )
+        self.assertIn("Sisa FA", change_table.columns)
+        self.assertIn("Basis pasangan FA", change_table.columns)
+
     def test_dashboard_analysis_prepares_rows_and_categories(self):
         rows = [
             ["Kode Anggaran", "Uraian", "Pagu", "Sisa Anggaran"],

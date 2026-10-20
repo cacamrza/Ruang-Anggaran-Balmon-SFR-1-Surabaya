@@ -1,6 +1,7 @@
 import hashlib
 import io
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import pandas as pd
@@ -559,6 +560,12 @@ def summarize_revision_changes(changes):
         "unknown_count": sum(row["_status"] == "unknown" for row in leaf_increases),
         "shortfall": sum(row["Selisih"] - row["Sisa anggaran"] for row in insufficient),
     }
+
+
+def normalize_budget_description(description):
+    description = clean_text(description).casefold().replace("&", " dan ")
+    description = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", description)
+    return " ".join(re.findall(r"[a-z0-9]+", description))
 
 
 def budget_rows_with_paths(rows):
@@ -1468,7 +1475,7 @@ def analyze_combined_tables(tables):
             "decreases": [row for row in changes if row["Selisih"] < 0],
         }
         fa_analyses = [
-            analysis for _, analysis in valid
+            (source, analysis) for source, analysis in valid
             if analysis.get("budget_comparison")
         ]
         apply_fa_remaining_to_revision(revision, fa_analyses)
@@ -1539,13 +1546,13 @@ def analyze_combined_tables(tables):
 def apply_fa_remaining_to_revision(revision, fa_analyses):
     fa_rows = []
     fa_paths = []
-    for analysis in fa_analyses:
+    for source, analysis in fa_analyses:
         source_rows = analysis.get("rows", [])
         raw_rows = [row.get("_raw") for row in source_rows if row.get("_raw")]
         paths = budget_rows_with_paths(raw_rows)
         for row, path in zip(source_rows, paths):
             if row.get("Tingkat") in BUDGET_LEVEL_LABELS.values():
-                fa_rows.append(row)
+                fa_rows.append(dict(row, Sumber=source))
                 fa_paths.append(path)
 
     for change in revision["changes"]:
@@ -1572,27 +1579,103 @@ def apply_fa_remaining_to_revision(revision, fa_analyses):
                 candidates.append((row, path))
 
         change_path = change.get("_path", ())
-        if kind == "ITEM" and not code_key:
+        matching_basis = "Kode dan hierarki"
+        if kind == "ITEM":
             parent_path = change_path[:-1]
-            exact_path = [
-                item for item in candidates
-                if item[1] and item[1][:-1] == parent_path
+            item_candidates = [
+                (row, path)
+                for row, path in zip(fa_rows, fa_paths)
+                if row.get("Tingkat") == BUDGET_LEVEL_LABELS["ITEM"]
+                and path
+                and path[:-1] == parent_path
             ]
+            code_matches = [
+                item for item in candidates
+                if code_key
+                and normalize_hierarchy_code("ITEM", item[0].get("Kode", "")) == code_key
+                and item[1]
+                and item[1][:-1] == parent_path
+            ]
+            candidates = code_matches or item_candidates
+            if code_matches:
+                matching_basis = "Kode dan hierarki"
+            normalized_description = normalize_budget_description(change["Uraian menjadi"])
+            exact_description = [
+                item for item in candidates
+                if normalize_budget_description(item[0]["Uraian"]) == normalized_description
+            ]
+            if exact_description and not code_matches:
+                candidates = exact_description
+                matching_basis = "Uraian rincian cocok"
+            elif candidates and not code_matches:
+                scored = sorted(
+                    [
+                        (
+                            SequenceMatcher(
+                                None,
+                                normalized_description,
+                                normalize_budget_description(item[0]["Uraian"]),
+                            ).ratio(),
+                            item,
+                        )
+                        for item in candidates
+                    ],
+                    key=lambda match: match[0],
+                    reverse=True,
+                )
+                if (
+                    scored[0][0] >= 0.82
+                    and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.08)
+                ):
+                    candidates = [scored[0][1]]
+                    matching_basis = "Uraian rincian paling mirip"
+                else:
+                    candidates = []
         else:
             exact_path = [item for item in candidates if item[1] == change_path]
-        if exact_path:
-            candidates = exact_path
-        if len(candidates) > 1:
-            description = change["Uraian menjadi"].casefold()
-            matching_description = [
-                item for item in candidates
-                if item[0]["Uraian"].casefold() == description
-            ]
-            if matching_description:
-                candidates = matching_description
+            if exact_path:
+                candidates = exact_path
+            if len(candidates) > 1:
+                description = normalize_budget_description(change["Uraian menjadi"])
+                matching_description = [
+                    item for item in candidates
+                    if normalize_budget_description(item[0]["Uraian"]) == description
+                ]
+                if matching_description:
+                    candidates = matching_description
 
-        remaining = candidates[0][0].get("Sisa anggaran") if len(candidates) == 1 else None
+        remaining_values = [item[0].get("Sisa anggaran") for item in candidates]
+        remaining = (
+            sum(remaining_values)
+            if remaining_values and all(value is not None for value in remaining_values)
+            else None
+        )
+        if kind == "ITEM" and remaining is None:
+            parent_path = change_path[:-1]
+            for prefix_length in range(len(parent_path), 0, -1):
+                ancestor_path = parent_path[:prefix_length]
+                ancestor_candidates = [
+                    (row, path)
+                    for row, path in zip(fa_rows, fa_paths)
+                    if path == ancestor_path and row.get("Sisa anggaran") is not None
+                ]
+                if len(ancestor_candidates) == 1:
+                    candidates = ancestor_candidates
+                    remaining = ancestor_candidates[0][0]["Sisa anggaran"]
+                    ancestor_kind = ancestor_path[-1][0]
+                    matching_basis = "Sisa FA pada {}".format(
+                        BUDGET_LEVEL_LABELS[ancestor_kind].lower()
+                    )
+                    break
+        if len(candidates) > 1 and matching_basis == "Uraian rincian cocok":
+            matching_basis = "Gabungan rincian beruraian sama"
         change["Sisa anggaran"] = remaining
+        change["Basis pasangan FA"] = matching_basis if remaining is not None else "Sisa FA tidak ditemukan"
+        change["Sumber Sisa FA"] = ", ".join(sorted({
+            row.get("Sumber", "")
+            for row, _ in candidates
+            if row.get("Sumber")
+        }))
         change["Sisa setelah kenaikan"] = (
             remaining - change["Selisih"]
             if change["Selisih"] > 0 and remaining is not None
@@ -1908,9 +1991,18 @@ def render_dashboard(data):
         col3.metric("Baris pada tingkat terpilih", len(categories))
         col4.metric("Rincian bernilai", len(analysis["rows"]))
 
+    has_fa_source = any(
+        "fa detail" in source.casefold() or "perbandingan anggaran" in source.casefold()
+        for source in analysis.get("sources", [])
+    )
     revision = analysis.get("revision")
     if revision:
         st.markdown("### Perubahan RAB & kecukupan dana")
+        if has_fa_source:
+            st.caption(
+                "Pagu semula dan menjadi diambil dari Excel revisi; Sisa FA dipasangkan dari laporan FA Detail "
+                "berdasarkan kode/jalur hierarki dan uraian rincian."
+            )
         if revision["insufficient_count"]:
             st.warning("{} kenaikan pada tingkat terendah perlu ditinjau: sisa FA tidak lebih besar dari selisih.".format(revision["insufficient_count"]))
         elif revision["unknown_count"]:
@@ -1953,7 +2045,6 @@ def render_dashboard(data):
         )
         if revision["changes"]:
             revision_frame = pd.DataFrame(revision["changes"]).drop(columns=["_status", "_path"], errors="ignore")
-            has_fa_source = any("fa detail" in source.casefold() for source in analysis.get("sources", []))
             remaining_label = "Sisa FA" if has_fa_source else "Sisa anggaran"
             revision_frame = revision_frame.rename(columns={"Sisa anggaran": remaining_label})
             st.dataframe(revision_frame, use_container_width=True, hide_index=True)
