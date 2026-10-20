@@ -24,7 +24,18 @@ BUDGET_HEADERS = [
     "Realisasi",
     "Sisa Anggaran",
     "Status Pasangan",
+    "Induk",
 ]
+BUDGET_LEVEL_LABELS = {
+    "PROGRAM": "Program",
+    "KEGIATAN": "Kegiatan",
+    "KRO": "KRO",
+    "RO": "RO",
+    "KOMPONEN": "Komponen",
+    "SUBKOMPONEN": "Subkomponen",
+    "AKUN": "Akun belanja",
+    "DETIL": "Detil belanja",
+}
 
 
 def clean_text(value):
@@ -200,81 +211,107 @@ def parse_rincian_kertas_text(pages_text):
     if not any(re.search(r"RINCIAN KERTAS KERJA SATKER", text, re.I) for text in pages_text):
         return None
 
-    ro_pattern = re.compile(r"(?<![\w.])(?P<code>\d{4}\.[A-Z0-9]{3}\.[A-Z0-9]{3})(?![\w.])", re.I)
     amount_pattern = re.compile(r"(?<![\w,])\d{1,3}(?:,\d{3})+(?![\w,])")
+    patterns = (
+        ("PROGRAM", re.compile(r"^(?P<code>\d{3}\.\d{2}\.[A-Z0-9]{2})\s+(?P<description>.*)$", re.I)),
+        ("RO", re.compile(r"^(?P<code>\d{4}\.[A-Z0-9]{3}\.[A-Z0-9]{3})\s+(?P<description>.*)$", re.I)),
+        ("KRO", re.compile(r"^(?P<code>\d{4}\.[A-Z0-9]{3})\s+(?P<description>.*)$", re.I)),
+        ("KEGIATAN", re.compile(r"^(?P<code>\d{4})\s+(?P<description>.*)$", re.I)),
+        ("AKUN", re.compile(r"^(?P<code>\d{6})\s+(?P<description>.*)$")),
+        ("KOMPONEN", re.compile(r"^(?P<code>\d{3})\s+(?P<description>.*)$")),
+        ("SUBKOMPONEN", re.compile(r"^(?P<code>[A-Z])\s+(?P<description>.*)$")),
+        ("DETIL", re.compile(r"^(?P<description>[-•]\s+.*)$")),
+    )
+    parent_levels = {
+        "PROGRAM": None,
+        "KEGIATAN": "PROGRAM",
+        "KRO": "KEGIATAN",
+        "RO": "KRO",
+        "KOMPONEN": "RO",
+        "SUBKOMPONEN": "KOMPONEN",
+        "AKUN": "SUBKOMPONEN",
+        "DETIL": "AKUN",
+    }
+    descendants = {
+        "PROGRAM": ("KEGIATAN", "KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
+        "KEGIATAN": ("KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
+        "KRO": ("RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
+        "RO": ("KOMPONEN", "SUBKOMPONEN", "AKUN"),
+        "KOMPONEN": ("SUBKOMPONEN", "AKUN"),
+        "SUBKOMPONEN": ("AKUN",),
+        "AKUN": (),
+        "DETIL": (),
+    }
     total_allocation = None
-    current_ro = None
-    ro_rows = {}
     blocked_total = 0
+    hierarchy_rows = []
+    current = {}
 
     for page_text in pages_text:
-        pending_description = None
-        previous_line_amounts = []
         for line in page_text.splitlines():
-            line_amounts = list(amount_pattern.finditer(line))
             if total_allocation is None and re.search(r"\bALOKASI\b", line, re.I):
-                if line_amounts:
-                    total_allocation = to_number(line_amounts[-1].group(0))
+                allocation_amounts = list(amount_pattern.finditer(line))
+                if allocation_amounts:
+                    total_allocation = to_number(allocation_amounts[-1].group(0))
 
-            if re.search(r"^\s*(?:RINCIAN KERTAS|KEMEN/LEMB|UNIT ORG|UNIT KERJA|ALOKASI|Halaman\s*:|PROGRAM/|KODE\s*$|\([1-6]\))", line, re.I):
-                pending_description = None
-                previous_line_amounts = []
-                continue
-            code_match = ro_pattern.search(line)
-            if code_match:
-                current_ro = code_match.group("code").upper()
-                tail = line[code_match.end():]
-                amounts = list(amount_pattern.finditer(tail))
-                description = tail[:amounts[0].start()].strip() if amounts else tail.strip()
-                description = re.sub(r"\s+\d+(?:\.\d+)?\s+\S+$", "", description).strip()
-                amount = to_number(amounts[-1].group(0)) if amounts else (
-                    to_number(previous_line_amounts[-1]) if previous_line_amounts else None
-                )
-                row = ro_rows.setdefault(current_ro, {
-                    "code": current_ro,
-                    "description": description,
-                    "full_budget": 0,
-                    "blocked": 0,
-                })
-                if description:
-                    row["description"] = "{} {}".format(row["description"], description).strip() if row["description"] and row["description"] not in description else description
-                if amount is not None:
-                    row["full_budget"] += amount
-                pending_description = current_ro
-                previous_line_amounts = [match.group(0) for match in line_amounts]
+            text = line.strip()
+            if not text or re.match(
+                r"^(?:RINCIAN KERTAS|KEMEN/LEMB|UNIT ORG|UNIT KERJA|ALOKASI|Halaman\s*:|PROGRAM/|KODE\s*$|SUBKOMP/|DETIL VOLUME|\([1-6]\)|Lokasi\s*:|\(KPPN\.)",
+                text,
+                re.I,
+            ):
                 continue
 
-            if pending_description:
-                continuation = line.strip()
-                if (
-                    continuation
-                    and not line_amounts
-                    and not re.match(r"^(?:\d+(?:\.\d+)?\s|[A-Z]\s|[-•])", continuation, re.I)
-                ):
-                    ro_rows[pending_description]["description"] = "{} {}".format(
-                        ro_rows[pending_description]["description"], continuation
-                    ).strip()
-                pending_description = None
-
-            amounts = list(amount_pattern.finditer(line))
-            if re.search(r"\*\s*$", line) and current_ro and amounts:
-                blocked = to_number(amounts[-1].group(0)) or 0
-                ro_rows[current_ro]["blocked"] += blocked
-                blocked_total += blocked
-                previous_line_amounts = []
+            matched = next(
+                ((kind, code_match) for kind, pattern in patterns if (code_match := pattern.match(text))),
+                None,
+            )
+            if matched:
+                kind, code_match = matched
+                code = clean_text(code_match.groupdict().get("code")).upper()
+                content = code_match.group("description")
+                amounts = list(amount_pattern.finditer(content))
+                description = content[:amounts[0].start()].strip() if amounts else content.strip()
+                description = re.sub(r"\s+\d+(?:[.,]\d+)?\s+\S+\s*$", "", description).strip()
+                amount = to_number(amounts[-1].group(0)) if amounts else None
+                parent_level = parent_levels[kind]
+                parent = current.get(parent_level) if parent_level else None
+                if kind == "AKUN" and parent is None:
+                    parent = current.get("KOMPONEN")
+                blocked = amount if kind == "DETIL" and text.endswith("*") else None
+                row = [
+                    kind,
+                    code,
+                    description,
+                    amount,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "Menunggu Laporan FA" if kind == "RO" else "Rincian Kertas Kerja",
+                    parent[1] if parent else None,
+                ]
+                hierarchy_rows.append(row)
+                current[kind] = row
+                for descendant in descendants[kind]:
+                    current.pop(descendant, None)
+                if blocked is not None:
+                    blocked_total += blocked
+                    for ancestor in current.values():
+                        ancestor[5] = (ancestor[5] or 0) + blocked
                 continue
-            previous_line_amounts = [match.group(0) for match in line_amounts]
+
+            if current and not amount_pattern.search(text) and not re.match(r"^[A-Z]\s", text):
+                last_row = hierarchy_rows[-1]
+                if not text.startswith(("(", "-", "•")):
+                    last_row[2] = "{} {}".format(last_row[2], text).strip()
 
     rows = [BUDGET_HEADERS]
     rows.append([
-        "TOTAL", "TOTAL", "ALOKASI", total_allocation, None, blocked_total, None, None, "TOTAL",
+        "TOTAL", "TOTAL", "ALOKASI", total_allocation, None, blocked_total, None, None, "TOTAL", None,
     ])
-    for item in ro_rows.values():
-        rows.append([
-            "RO", item["code"], item["description"], item["full_budget"] or None,
-            None, item["blocked"], None, None, "Menunggu Laporan FA",
-        ])
-    if total_allocation is None and not ro_rows:
+    rows.extend(hierarchy_rows)
+    if total_allocation is None and not any(row[0] == "RO" for row in hierarchy_rows):
         raise ValueError("PDF Rincian Kertas Kerja terdeteksi, tetapi nilai alokasi dan kode RO tidak terbaca.")
     return rows
 
@@ -336,12 +373,12 @@ def parse_fa_text(pages_text):
     if overall:
         rows.append([
             "TOTAL", "TOTAL", "JUMLAH SELURUHNYA", None, overall[0], None,
-            overall[1], overall[2], "TOTAL",
+            overall[1], overall[2], "TOTAL", None,
         ])
     for item in ro_rows.values():
         rows.append([
             "RO", item["code"], item["description"], None, item["effective"], None,
-            item["realized"], item["remaining"], "Menunggu Rincian Kertas Kerja",
+            item["realized"], item["remaining"], "Menunggu Rincian Kertas Kerja", None,
         ])
     if not overall and not ro_rows:
         raise ValueError("Laporan FA terdeteksi, tetapi pagu revisi, realisasi, dan sisa tidak terbaca.")
@@ -365,15 +402,10 @@ def combine_budget_documents(documents):
 
     rkk_total = next((row for row in rkk_rows if row[0] == "TOTAL"), None)
     fa_total = next((row for row in fa_rows if row[0] == "TOTAL"), None)
-    rkk_by_code = {
-        normalize_ro_code(row[1]): row for row in rkk_rows
-        if row[0] == "RO" and normalize_ro_code(row[1])
-    }
     fa_by_code = {
         normalize_ro_code(row[1]): row for row in fa_rows
         if row[0] == "RO" and normalize_ro_code(row[1])
     }
-    codes = list(dict.fromkeys(list(rkk_by_code) + list(fa_by_code)))
     rows = [BUDGET_HEADERS]
     rows.append([
         "TOTAL",
@@ -385,25 +417,33 @@ def combine_budget_documents(documents):
         fa_total[6] if fa_total else None,
         fa_total[7] if fa_total else None,
         "TOTAL",
+        None,
     ])
-    for code in codes:
-        rkk = rkk_by_code.get(code)
+    seen_codes = set()
+    for row in rkk_rows:
+        if row[0] != "RO":
+            rows.append(row)
+            continue
+        code = normalize_ro_code(row[1])
         fa = fa_by_code.get(code)
-        source = rkk or fa
-        full_code = rkk[1] if rkk else fa[1]
-        description = rkk[2] if rkk and rkk[2] else fa[2]
-        status = "Cocok berdasarkan kode RO" if rkk and fa else "Hanya di Rincian Kertas Kerja" if rkk else "Hanya di Laporan FA"
-        rows.append([
-            "RO",
-            full_code,
-            description or source[2],
-            rkk[3] if rkk else None,
-            fa[4] if fa else None,
-            rkk[5] if rkk else None,
-            fa[6] if fa else None,
-            fa[7] if fa else None,
-            status,
-        ])
+        if code:
+            seen_codes.add(code)
+        row = list(row)
+        if fa:
+            row[4] = fa[4]
+            row[6] = fa[6]
+            row[7] = fa[7]
+            row[8] = "Cocok berdasarkan kode RO"
+        else:
+            row[8] = "Hanya di Rincian Kertas Kerja"
+        rows.append(row)
+
+    for code, fa in fa_by_code.items():
+        if code in seen_codes:
+            continue
+        unmatched = list(fa)
+        unmatched[8] = "Hanya di Laporan FA"
+        rows.append(unmatched)
     return rows
 
 
@@ -620,7 +660,8 @@ def analyze_budget_rows(rows, sheet_name):
     total = next((row for row in rows[1:] if row[positions["_Jenis"]] == "TOTAL"), [])
     prepared = []
     for index, raw in enumerate(rows[1:], start=2):
-        if raw[positions["_Jenis"]] != "RO":
+        kind = clean_text(raw[positions["_Jenis"]])
+        if kind == "TOTAL":
             continue
         code = clean_text(raw[positions["Kode Anggaran"]])
         description = clean_text(raw[positions["Uraian"]])
@@ -629,7 +670,9 @@ def analyze_budget_rows(rows, sheet_name):
         full = to_number(raw[positions["Pagu Penuh"]])
         effective = to_number(raw[positions["Pagu Efektif"]])
         prepared.append({
+            "Tingkat": BUDGET_LEVEL_LABELS.get(kind, kind.title()),
             "Kode": code,
+            "Induk": clean_text(raw[positions["Induk"]]),
             "Uraian": description,
             "Pagu": effective if effective is not None else full,
             "Pagu Penuh": full,
@@ -651,24 +694,54 @@ def analyze_budget_rows(rows, sheet_name):
         "pagu_terblokir": total_value("Pagu Terblokir"),
         "realisasi": total_value("Realisasi"),
         "sisa": total_value("Sisa Anggaran"),
-        "matched_count": sum(row["Status Pasangan"] == "Cocok berdasarkan kode RO" for row in prepared),
-        "unmatched_count": sum(row["Status Pasangan"] != "Cocok berdasarkan kode RO" for row in prepared),
+        "matched_count": sum(
+            row["Tingkat"] == "RO" and row["Status Pasangan"] == "Cocok berdasarkan kode RO"
+            for row in prepared
+        ),
+        "unmatched_count": sum(
+            row["Tingkat"] == "RO" and row["Status Pasangan"] != "Cocok berdasarkan kode RO"
+            for row in prepared
+        ),
     }
-    categories = [
-        {
-            "Kode": row["Kode"],
-            "Kategori": "{} · {}".format(row["Kode"], row["Uraian"]),
-            "Pagu": row["Pagu"],
-            "Pagu Penuh": row["Pagu Penuh"],
-            "Pagu Efektif": row["Pagu Efektif"],
-            "Pagu Terblokir": row["Pagu Terblokir"],
-            "Realisasi": row["Realisasi"],
-            "Sisa": row["Sisa anggaran"],
-        }
-        for row in prepared if row["Pagu"] is not None and row["Pagu"] > 0
-    ]
-    categories.sort(key=lambda row: row["Pagu"], reverse=True)
+    hierarchy_counts = {
+        kind: sum(row["Tingkat"] == label for row in prepared)
+        for kind, label in BUDGET_LEVEL_LABELS.items()
+    }
+    category_levels = {}
+    for kind, label in BUDGET_LEVEL_LABELS.items():
+        categories = [
+            {
+                "Kode": row["Kode"],
+                "Kategori": "{}{}{}".format(
+                    "{} · ".format(row["Kode"]) if row["Kode"] else "",
+                    row["Uraian"],
+                    " (induk {})".format(row["Induk"]) if row["Induk"] else "",
+                ),
+                "Pagu": row["Pagu"],
+                "Pagu Penuh": row["Pagu Penuh"],
+                "Pagu Efektif": row["Pagu Efektif"],
+                "Pagu Terblokir": row["Pagu Terblokir"],
+                "Realisasi": row["Realisasi"],
+                "Sisa": row["Sisa anggaran"],
+            }
+            for row in prepared
+            if row["Tingkat"] == label and row["Pagu"] is not None and row["Pagu"] > 0
+        ]
+        if categories:
+            categories.sort(key=lambda row: row["Pagu"], reverse=True)
+            category_levels[kind] = categories
+    default_level = next(
+        (kind for kind in ("AKUN", "DETIL", "RO", "KEGIATAN", "PROGRAM") if kind in category_levels),
+        next(iter(category_levels), None),
+    )
+    categories = category_levels.get(default_level, [])
+    hierarchy_summary = ", ".join(
+        "{} {}".format(count, BUDGET_LEVEL_LABELS[kind])
+        for kind, count in hierarchy_counts.items() if count
+    )
     insights = []
+    if hierarchy_summary:
+        insights.append("Hierarki yang dibaca: {}.".format(hierarchy_summary))
     if comparison["pagu_terblokir"] is not None:
         insights.append("Pagu terblokir yang ditandai * pada Rincian Kertas Kerja berjumlah {}.".format(
             format_rupiah(comparison["pagu_terblokir"])
@@ -686,7 +759,9 @@ def analyze_budget_rows(rows, sheet_name):
         ))
     if categories:
         top = categories[0]
-        insights.append("{} memiliki pagu efektif terbesar di antara RO yang terbaca.".format(top["Kategori"]))
+        insights.append("{} memiliki pagu terbesar pada tingkat {}.".format(
+            top["Kategori"], BUDGET_LEVEL_LABELS[default_level].lower()
+        ))
 
     return {
         "sheet": sheet_name,
@@ -695,6 +770,9 @@ def analyze_budget_rows(rows, sheet_name):
         "rows": prepared,
         "ranked": sorted(prepared, key=lambda row: row["Pagu"] or 0, reverse=True)[:5],
         "categories": categories,
+        "category_levels": category_levels,
+        "default_category_level": default_level,
+        "hierarchy_counts": hierarchy_counts,
         "columns": [(index, name) for index, name in enumerate(header) if name and not name.startswith("_")],
         "money_col": positions["Pagu Efektif"],
         "remaining_col": positions["Sisa Anggaran"],
@@ -702,7 +780,7 @@ def analyze_budget_rows(rows, sheet_name):
         "remaining_total": comparison["sisa"],
         "category_total": sum(row["Pagu"] for row in categories),
         "category_remaining_total": sum(row["Sisa"] for row in categories if row["Sisa"] is not None),
-        "grouping": "rincian output (RO)",
+        "grouping": BUDGET_LEVEL_LABELS.get(default_level, "rincian anggaran"),
         "source_count": len(prepared),
         "excluded_count": 0,
         "insights": insights[:5],
@@ -1113,8 +1191,24 @@ def render_dashboard(data):
     ))
     if analysis.get("sources"):
         st.caption("Sumber gabungan: {}".format(" · ".join(analysis["sources"])))
-    categories = analysis.get("categories", [])
     comparison = analysis.get("budget_comparison")
+    category_levels = analysis.get("category_levels", {})
+    if category_levels:
+        level_options = list(category_levels)
+        default_level = analysis.get("default_category_level")
+        level_index = level_options.index(default_level) if default_level in level_options else 0
+        selected_level = st.selectbox(
+            "Tingkat hierarki untuk grafik",
+            level_options,
+            index=level_index,
+            format_func=lambda level: BUDGET_LEVEL_LABELS.get(level, level.title()),
+            key="budget_hierarchy_level",
+        )
+        categories = category_levels[selected_level]
+    else:
+        selected_level = None
+        categories = analysis.get("categories", [])
+    has_fa_comparison = bool(comparison and comparison.get("pagu_efektif") is not None)
     if comparison:
         metric_columns = st.columns(5)
         metric_columns[0].metric("Pagu penuh", format_compact_rupiah(comparison["pagu_penuh"]))
@@ -1131,7 +1225,7 @@ def render_dashboard(data):
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total pagu kategori", format_compact_rupiah(pagu_for_card))
         col2.metric("Sisa anggaran", format_compact_rupiah(remaining_for_card))
-        col3.metric("Kategori dianalisis", len(categories))
+        col3.metric("Baris pada tingkat terpilih", len(categories))
         col4.metric("Rincian bernilai", len(analysis["rows"]))
 
     revision = analysis.get("revision")
@@ -1157,8 +1251,8 @@ def render_dashboard(data):
     if categories:
         chart_frame = pd.DataFrame(categories)
         st.markdown("### {} terbesar per {}".format(
-            "Pagu efektif" if comparison else "Pagu",
-            "RO" if comparison else "kategori",
+            "Pagu efektif" if has_fa_comparison and selected_level == "RO" else "Pagu",
+            BUDGET_LEVEL_LABELS.get(selected_level, "kategori").lower() if selected_level else "kategori",
         ))
         pagu_data = chart_frame.nlargest(10, "Pagu").sort_values("Pagu")
         axis_divisor = 1_000_000_000 if pagu_data["Pagu"].max() >= 1_000_000_000 else 1_000_000 if pagu_data["Pagu"].max() >= 1_000_000 else 1
@@ -1195,7 +1289,7 @@ def render_dashboard(data):
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        if comparison:
+        if has_fa_comparison and selected_level == "RO":
             compare_columns = [
                 column for column in ("Pagu Penuh", "Pagu Efektif", "Realisasi")
                 if chart_frame[column].notna().any()
@@ -1234,7 +1328,7 @@ def render_dashboard(data):
                 st.markdown("### Perbandingan pagu dan realisasi per RO")
                 st.plotly_chart(comparison_fig, use_container_width=True)
 
-        st.markdown("### Porsi {} ".format("pagu efektif" if comparison else "pagu"))
+        st.markdown("### Porsi {} ".format("pagu efektif" if has_fa_comparison and selected_level == "RO" else "pagu"))
         pie_data = chart_frame.nlargest(5, "Pagu").copy()
         pie_data["Label"] = pie_data.apply(
             lambda row: row["Kode"] or row["Kategori"][:24],
@@ -1324,7 +1418,10 @@ def render_dashboard(data):
 
 
 def infer_activity(analysis):
-    coded = next((row for row in analysis.get("rows", []) if re.fullmatch(r"\d+(?:\.[A-Z0-9]+){2,}", row["Kode"], re.I) and row["Pagu"] is not None), None)
+    coded = next((
+        row for row in analysis.get("rows", [])
+        if row.get("Tingkat") == "RO" and row["Pagu"] is not None
+    ), None)
     if coded:
         return coded["Uraian"]
     if analysis.get("ranked"):
@@ -1599,7 +1696,7 @@ def render_tor(data):
     )
     selected_row = None
     if analysis.get("budget_comparison"):
-        ro_rows = [row for row in analysis["rows"] if row["Kode"]]
+        ro_rows = [row for row in analysis["rows"] if row.get("Tingkat") == "RO" and row["Kode"]]
         if ro_rows:
             row_by_code = {row["Kode"]: row for row in ro_rows}
             selected_code = st.selectbox(

@@ -95,8 +95,11 @@ BAH.078 Layanan Dukungan RO 1,000,000 0 400,000 0 400,000 40.00 % 600,000
         self.assertEqual(analysis["budget_comparison"]["realisasi"], 400000)
         self.assertEqual(analysis["budget_comparison"]["sisa"], 600000)
         self.assertEqual(analysis["budget_comparison"]["pagu_terblokir"], 100000)
+        self.assertEqual(analysis["budget_comparison"]["matched_count"], 1)
+        self.assertEqual(analysis["budget_comparison"]["unmatched_count"], 0)
         ro = analysis["rows"][0]
         self.assertEqual(ro["Kode"], "7437.BAH.078")
+        self.assertEqual(ro["Pagu Terblokir"], 100000)
         self.assertEqual(ro["Status Pasangan"], "Cocok berdasarkan kode RO")
         sections = streamlit_app.build_tor_sections(
             ro["Uraian"], "Surabaya", "2026", "", analysis, selected_row=ro,
@@ -105,6 +108,37 @@ BAH.078 Layanan Dukungan RO 1,000,000 0 400,000 0 400,000 40.00 % 600,000
         self.assertIn("Kode RO: 7437.BAH.078", financing)
         self.assertIn("Pagu penuh: Rp 1.500.000", financing)
         self.assertIn("Pagu terblokir: Rp 100.000", financing)
+
+    def test_budget_parser_and_analysis_preserve_full_hierarchy(self):
+        workplan = streamlit_app.parse_rincian_kertas_text(["""
+RINCIAN KERTAS KERJA SATKER T.A. 2026
+ALOKASI Rp. 1,500,000
+059.09.GL Dukungan layanan 1.0 program 1,500,000
+7437 Kegiatan dukungan 1.0 kegiatan 1,500,000
+7437.BAH Layanan dukungan 1.0 layanan 1,500,000
+7437.BAH.078 Layanan pengujian 1.0 layanan 1,500,000
+101 Komponen utama 1.0 paket 1,500,000
+A Perjalanan dinas 1.0 paket 1,500,000
+521115 Belanja perjalanan 1.0 paket 1,500,000
+- Tiket perjalanan 1.0 paket 1,500,000 *
+"""])
+
+        analysis = streamlit_app.analyze_rows(workplan, "Rincian Kertas Kerja")
+        rows_by_level = {row["Tingkat"]: row for row in analysis["rows"]}
+
+        self.assertEqual(
+            set(rows_by_level),
+            {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Akun belanja", "Detil belanja"},
+        )
+        self.assertEqual(rows_by_level["Program"]["Kode"], "059.09.GL")
+        self.assertEqual(rows_by_level["Kegiatan"]["Kode"], "7437")
+        self.assertEqual(rows_by_level["Akun belanja"]["Kode"], "521115")
+        self.assertEqual(rows_by_level["Detil belanja"]["Pagu Terblokir"], 1500000)
+        self.assertEqual(rows_by_level["Kegiatan"]["Induk"], "059.09.GL")
+        self.assertEqual(rows_by_level["Detil belanja"]["Induk"], "521115")
+        self.assertEqual(analysis["hierarchy_counts"]["DETIL"], 1)
+        self.assertIn("AKUN", analysis["category_levels"])
+        self.assertIn("DETIL", analysis["category_levels"])
 
     def test_tor_download_is_a_valid_word_document(self):
         analysis = {
