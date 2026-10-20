@@ -49,6 +49,76 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(revision["sufficient_count"], 1)
         self.assertEqual(revision["shortfall"], 5)
 
+    def test_revision_detects_changes_at_each_budget_hierarchy_level(self):
+        rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.GL", "Program", 100, "059.GL", "Program", 150, 50],
+            [None, "7437", "Kegiatan", 100, "7437", "Kegiatan", 150, 50],
+            [None, "7437.BAH", "KRO", 100, "7437.BAH", "KRO", 150, 50],
+            [None, "7437.BAH.078", "RO", 100, "7437.BAH.078", "RO", 150, 50],
+            [None, "100", "Komponen", 100, "100", "Komponen", 150, 50],
+            [None, "A", "Subkomponen", 100, "A", "Subkomponen", 150, 50],
+            [None, "521115", "Akun belanja", 100, "521115", "Akun belanja", 150, 50],
+        ]
+
+        revision = streamlit_app.find_revision(rows)
+
+        self.assertEqual(len(revision["changes"]), 7)
+        self.assertEqual(
+            {change["Tingkat"] for change in revision["changes"]},
+            {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
+        )
+        self.assertEqual(revision["increase_total"], 50)
+
+    def test_fa_detail_rows_cover_all_levels_and_match_revision_changes(self):
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 1,000,000 0 200,000 0 200,000 20.00 % 800,000
+GL Program 1,000,000 0 200,000 0 200,000 20.00 % 800,000
+GL.7437 Kegiatan 1,000,000 0 200,000 0 200,000 20.00 % 800,000
+BAH KRO 1,000,000 0 200,000 0 200,000 20.00 % 800,000
+BAH.078 RO 1,000,000 0 200,000 0 200,000 20.00 % 800,000
+100 Komponen 500,000 0 100,000 0 100,000 20.00 % 400,000
+100.0A Subkomponen 500,000 0 100,000 0 100,000 20.00 % 400,000
+521115 Belanja honor 500,000 0 100,000 0 100,000 20.00 % 400,000
+000001. Item detail 500,000 0 100,000 0 100,000 20.00 % 400,000
+"""])
+        kinds = {row[0] for row in financial[1:]}
+        self.assertTrue({
+            "PROGRAM", "KEGIATAN", "KRO", "RO", "KOMPONEN",
+            "SUBKOMPONEN", "DETIL", "ITEM",
+        }.issubset(kinds))
+
+        revision_rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.GL", "Program", 400, "059.GL", "Program", 450, 50],
+            [None, "7437", "Kegiatan", 400, "7437", "Kegiatan", 450, 50],
+            [None, "7437.BAH", "KRO", 400, "7437.BAH", "KRO", 450, 50],
+            [None, "7437.BAH.078", "RO", 400, "7437.BAH.078", "RO", 450, 50],
+            [None, "100", "Komponen", 400, "100", "Komponen", 450, 50],
+            [None, "A", "Subkomponen", 400, "A", "Subkomponen", 450, 50],
+            [None, "521115", "Belanja honor", 400, "521115", "Belanja honor", 450, 50],
+        ]
+        combined = streamlit_app.analyze_combined_tables([
+            ("Revisi Excel", revision_rows),
+            ("Laporan FA Detail", financial),
+        ])
+        revision = combined["revision"]
+        self.assertIn("KOMPONEN", combined["category_levels"])
+        self.assertIn("ITEM", combined["category_levels"])
+        selected_component_totals = streamlit_app.hierarchy_budget_totals(combined, "KOMPONEN")
+        self.assertEqual(selected_component_totals["pagu_efektif"], 500000)
+        self.assertEqual(selected_component_totals["sisa"], 400000)
+
+        component = next(row for row in revision["changes"] if row["Tingkat"] == "Komponen")
+        account = next(row for row in revision["changes"] if row["Tingkat"] == "Detil belanja")
+        self.assertEqual(component["Sisa anggaran"], 400000)
+        self.assertEqual(component["Kecukupan"], "Sisa cukup")
+        self.assertEqual(account["Sisa anggaran"], 400000)
+        self.assertEqual(account["Kecukupan"], "Sisa cukup")
+
     def test_dashboard_analysis_prepares_rows_and_categories(self):
         rows = [
             ["Kode Anggaran", "Uraian", "Pagu", "Sisa Anggaran"],
@@ -61,6 +131,82 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(len(analysis["rows"]), 2)
         self.assertEqual(len(analysis["categories"]), 2)
         self.assertEqual(analysis["category_total"], 180000)
+
+    def test_generic_uploaded_tables_build_all_detected_hierarchy_levels(self):
+        rows = [
+            ["Kode Anggaran", "Uraian", "Pagu", "Sisa Anggaran"],
+            ["059.GL", "Program", 1000, 500],
+            ["7437", "Kegiatan", 1000, 500],
+            ["7437.BAH", "KRO", 1000, 500],
+            ["7437.BAH.078", "RO", 1000, 500],
+            ["100", "Komponen", 500, 250],
+            ["A", "Subkomponen", 500, 250],
+            ["521115", "Akun belanja", 500, 250],
+            [None, "- Item rincian", 500, 250],
+        ]
+
+        analysis = streamlit_app.analyze_rows(rows, "Data Excel")
+
+        self.assertEqual(
+            {kind for kind, count in analysis["hierarchy_counts"].items() if count},
+            {"PROGRAM", "KEGIATAN", "KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "DETIL", "ITEM"},
+        )
+        self.assertEqual(
+            set(analysis["category_levels"]),
+            {"PROGRAM", "KEGIATAN", "KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "DETIL", "ITEM", "ALL"},
+        )
+        self.assertEqual(analysis["category_levels"]["ITEM"][0]["Sisa"], 250)
+
+    def test_compact_program_code_keeps_its_hierarchy_parent(self):
+        rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.09.WA", "Program Dukungan Manajemen", 0, "059.09.WA", "Program Dukungan Manajemen", 0, 0],
+            [None, "7427", "Kegiatan Manajemen", 0, "7427", "Kegiatan Manajemen", 0, 0],
+            [None, "7427.EBA", "Layanan Dukungan Manajemen", 0, "7427.EBA", "Layanan Dukungan Manajemen", 0, 0],
+            [None, "7427.EBA.960", "Layanan Tata Kelola", 100, "7427.EBA.960", "Layanan Tata Kelola", 100, 0],
+        ]
+
+        analysis = streamlit_app.analyze_rows(rows, "RAB")
+        program = next(row for row in analysis["rows"] if row["Kode"] == "059.09.WA")
+        activity = next(row for row in analysis["rows"] if row["Kode"] == "7427")
+
+        self.assertEqual(program["Tingkat"], "Program")
+        self.assertEqual(activity["Induk"], "WA")
+
+    def test_full_budget_card_rolls_up_zero_parent_amounts(self):
+        analysis = {
+            "budget_comparison": {"pagu_efektif": 100, "realisasi": 20, "sisa": 80},
+            "category_levels": {
+                "PROGRAM": [{"Kode": "WA"}],
+            },
+            "rows": [
+                {"Tingkat": "Program", "Kode": "WA", "Pagu Penuh": 0},
+                {"Tingkat": "Kegiatan", "Kode": "7427", "Induk": "WA", "Pagu Penuh": 0},
+                {"Tingkat": "KRO", "Kode": "EBA", "Induk": "7427", "Pagu Penuh": 0},
+                {"Tingkat": "RO", "Kode": "960", "Induk": "EBA", "Pagu Penuh": 100},
+            ],
+        }
+
+        totals = streamlit_app.hierarchy_budget_totals(analysis, "PROGRAM")
+
+        self.assertEqual(totals["pagu_penuh"], 100)
+
+    def test_hierarchy_cards_sum_available_values_when_some_rows_are_unmatched(self):
+        analysis = {
+            "budget_comparison": {"pagu_efektif": 100, "realisasi": 20, "sisa": 80},
+            "category_levels": {
+                "DETIL": [{"Kode": "521115"}, {"Kode": "521119"}],
+            },
+            "rows": [
+                {"Tingkat": "Detil belanja", "Kode": "521115", "Pagu Efektif": 60},
+                {"Tingkat": "Detil belanja", "Kode": "521119", "Pagu Efektif": None},
+            ],
+        }
+
+        totals = streamlit_app.hierarchy_budget_totals(analysis, "DETIL")
+
+        self.assertEqual(totals["pagu_efektif"], 60)
 
     def test_sp2d_pdf_text_parser_reads_category_and_wrapped_detail_rows(self):
         pages = ["""
