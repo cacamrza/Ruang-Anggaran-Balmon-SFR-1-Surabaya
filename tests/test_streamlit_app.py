@@ -1,7 +1,9 @@
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from docx import Document
@@ -45,11 +47,39 @@ class StreamlitAppTests(unittest.TestCase):
             "10.20.30.0/24",
         )
         self.assertFalse(guest_allowed)
-        self.assertIn("BALMON LOBBY TAMU", message)
+        self.assertIn("Wi-Fi tamu", message)
 
         unconfigured, message = streamlit_app.signup_network_status("10.20.30.45", "")
         self.assertFalse(unconfigured)
         self.assertIn("SIGNUP_ALLOWED_CIDRS", message)
+
+    def test_signup_uses_streamlit_secret_when_environment_is_unset(self):
+        fake_streamlit = SimpleNamespace(
+            context=SimpleNamespace(ip_address="198.51.100.7"),
+            secrets={"SIGNUP_ALLOWED_CIDRS": "198.51.100.0/24"},
+        )
+        with patch.dict(os.environ):
+            os.environ.pop("SIGNUP_ALLOWED_CIDRS", None)
+            with patch.object(streamlit_app, "st", fake_streamlit):
+                self.assertEqual(streamlit_app.get_signup_network_status(), (True, ""))
+
+    def test_signup_environment_setting_overrides_streamlit_secret(self):
+        fake_streamlit = SimpleNamespace(
+            context=SimpleNamespace(ip_address="198.51.100.7"),
+            secrets={"SIGNUP_ALLOWED_CIDRS": "10.20.30.0/24"},
+        )
+        with patch.dict(os.environ, {"SIGNUP_ALLOWED_CIDRS": "198.51.100.0/24"}):
+            with patch.object(streamlit_app, "st", fake_streamlit):
+                self.assertEqual(streamlit_app.get_signup_network_status(), (True, ""))
+
+    def test_signup_denies_access_when_visitor_ip_is_unavailable(self):
+        fake_streamlit = SimpleNamespace(context=SimpleNamespace(ip_address=None))
+        with patch.dict(os.environ, {"SIGNUP_ALLOWED_CIDRS": "192.168.100.0/24"}):
+            with patch.object(streamlit_app, "st", fake_streamlit):
+                allowed, message = streamlit_app.get_signup_network_status()
+
+        self.assertFalse(allowed)
+        self.assertIn("Alamat IP pengunjung", message)
 
     def test_revision_compares_remaining_to_increase(self):
         rows = [

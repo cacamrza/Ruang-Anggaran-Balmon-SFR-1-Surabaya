@@ -6,7 +6,6 @@ import os
 import re
 import secrets
 import sqlite3
-import socket
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1082,7 +1081,7 @@ def signup_network_status(client_ip, allowed_cidrs):
     if not allowed_cidrs:
         return False, "Pendaftaran belum diaktifkan. Admin perlu mengatur SIGNUP_ALLOWED_CIDRS ke jaringan internal kantor."
     if not client_ip:
-        return False, "Jaringan tidak dapat diverifikasi. Hubungkan ke Wi-Fi kantor dan akses aplikasi melalui proxy kantor."
+        return False, "Alamat IP pengunjung tidak dapat diverifikasi. Pendaftaran hanya tersedia melalui jaringan kantor yang diizinkan."
     try:
         address = ipaddress.ip_address(client_ip)
         networks = [ipaddress.ip_network(value.strip(), strict=False) for value in allowed_cidrs.split(",") if value.strip()]
@@ -1092,39 +1091,18 @@ def signup_network_status(client_ip, allowed_cidrs):
         return False, "Pendaftaran belum diaktifkan. Admin perlu mengatur SIGNUP_ALLOWED_CIDRS ke jaringan internal kantor."
     if any(address in network for network in networks):
         return True, ""
-    return False, "Pendaftaran hanya tersedia melalui Wi-Fi internal Balmon (kecuali BALMON LOBBY TAMU)."
+    return False, "Pendaftaran hanya tersedia dari jaringan kantor Balmon yang diizinkan. Wi-Fi tamu atau jaringan lain ditolak."
 
 
 def get_signup_network_status():
-    allowed_cidrs = os.environ.get("SIGNUP_ALLOWED_CIDRS", OFFICE_SIGNUP_CIDRS)
-    if not allowed_cidrs:
+    if "SIGNUP_ALLOWED_CIDRS" in os.environ:
+        allowed_cidrs = os.environ["SIGNUP_ALLOWED_CIDRS"]
+    else:
         try:
-            allowed_cidrs = st.secrets.get("SIGNUP_ALLOWED_CIDRS", "")
+            allowed_cidrs = st.secrets.get("SIGNUP_ALLOWED_CIDRS", OFFICE_SIGNUP_CIDRS)
         except StreamlitSecretNotFoundError:
-            allowed_cidrs = ""
+            allowed_cidrs = OFFICE_SIGNUP_CIDRS
     client_ip = getattr(st.context, "ip_address", None)
-    if not client_ip:
-        try:
-            networks = [
-                ipaddress.ip_network(value.strip(), strict=False)
-                for value in allowed_cidrs.split(",")
-                if value.strip()
-            ]
-        except ValueError:
-            networks = []
-        for network in networks:
-            probe_ip = network.network_address
-            if network.num_addresses > 2:
-                probe_ip += 1
-            try:
-                with socket.socket(socket.AF_INET if probe_ip.version == 4 else socket.AF_INET6, socket.SOCK_DGRAM) as probe:
-                    probe.connect((str(probe_ip), 9))
-                    local_ip = probe.getsockname()[0]
-                if local_ip:
-                    client_ip = local_ip
-                    break
-            except OSError:
-                continue
     return signup_network_status(client_ip, allowed_cidrs)
 
 
