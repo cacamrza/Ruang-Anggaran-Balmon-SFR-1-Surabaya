@@ -1,0 +1,26 @@
+{
+  "name": "rab-insight-tor-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local RAB dashboard and TOR draft generator",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@e965/xlsx": "^0.20.3",
+    "@vladmandic/face-api": "^1.7.15",
+    "cheerio": "^1.2.0",
+    "csv-parse": "^7.0.3",
+    "docx": "^9.10.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "pdf-parse": "^2.4.5",
+    "tesseract.js": "^7.0.0",
+    "word-extractor": "^1.0.4",
+    "yauzl": "^3.4.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

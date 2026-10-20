@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#092759">
+    <title>Ruang Anggaran — Insight & TOR</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/vendor/face-api/face-api.js" defer></script>
+    <script src="/vendor/tesseract/tesseract.min.js" defer></script>
+    <script src="/vendor/index.iife.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <section class="auth-screen" id="auth-screen">
+      <div class="auth-card">
+        <div class="auth-brand">RAB <span>&amp; TOR</span></div>
+        <div id="register-panel">
+          <div class="auth-heading">
+            <h1>Sign Up</h1>
+            <p>Daftar untuk melanjutkan ke dashboard</p>
+          </div>
+          <form id="register-form" class="auth-form">
+            <div id="credentials-step" class="auth-step">
+              <label><span class="sr-only">Email</span><input id="register-email" type="email" placeholder="Email" autocomplete="email" required></label>
+              <label><span class="sr-only">Kata sandi</span><input id="register-password" type="password" placeholder="Password" autocomplete="new-password" minlength="8" required></label>
+              <button class="primary-button auth-submit" id="continue-registration" type="button">Sign Up</button>
+            </div>
+            <div id="verification-step" class="auth-step hidden">
+              <div class="auth-verification-fields">
+                <label class="auth-field-label" for="employee-number">Nomor pegawai di kartu</label>
+                <input id="employee-number" type="text" inputmode="numeric" autocomplete="off" minlength="5" maxlength="24" placeholder="Nomor pegawai" required disabled>
+                <label class="auth-field-label" for="employee-card-photo">Foto kartu pegawai</label>
+                <label class="file-picker" for="employee-card-photo"><span>Pilih foto kartu</span><small>JPG, PNG, atau gambar lain</small></label>
+                <input id="employee-card-photo" type="file" accept="image/*" required disabled>
+                <small class="verification-hint">Pilih foto yang jelas, bagian depan kartu saja.</small>
+              </div>
+              <div class="camera-block">
+                <div class="camera-heading"><strong>Selfie bersama kartu</strong><span id="camera-status">Kamera belum dinyalakan</span></div>
+                <video id="verification-camera" autoplay muted playsinline></video>
+                <canvas id="verification-capture" class="hidden"></canvas>
+                <div class="camera-actions">
+                  <button class="secondary-button" id="start-camera" type="button">Nyalakan kamera</button>
+                  <button class="secondary-button" id="capture-photo" type="button" disabled>Ambil selfie + kartu</button>
+                </div>
+                <small>Pegang kartu dekat kamera dan hindari pantulan; pastikan wajah serta nomor pada kartu fokus. Kamera hanya dipakai untuk mengambil gambar pada sesi ini.</small>
+              </div>
+              <p class="verification-disclaimer">Prototipe ini memproses gambar di browser dan tidak menyimpan atau mengirim foto. Pemeriksaan wajah dan nomor kartu bersifat awal, tidak membuktikan kartu asli atau status pegawai, dan bukan liveness anti-pemalsuan. Kamera memerlukan HTTPS atau localhost. Jangan gunakan untuk melindungi data rahasia.</p>
+            </div>
+            <div class="auth-message hidden" id="register-message" role="alert"></div>
+            <div id="verification-actions" class="auth-step hidden">
+              <button class="primary-button auth-submit" id="register-submit" type="submit">Verify and Sign Up</button>
+              <button class="auth-back" id="back-to-credentials" type="button">Back</button>
+            </div>
+          </form>
+          <p class="auth-switch">Have an account? <button id="show-login" type="button">Log In</button></p>
+        </div>
+        <div id="login-panel" class="hidden">
+          <div class="auth-heading">
+            <h1>Log In</h1>
+            <p>Masuk ke dashboard</p>
+          </div>
+          <form id="login-form" class="auth-form">
+            <label><span class="sr-only">Email</span><input id="login-email" type="email" placeholder="Email" autocomplete="username" required></label>
+            <label><span class="sr-only">Kata sandi</span><input id="login-password" type="password" placeholder="Password" autocomplete="current-password" required></label>
+            <div class="auth-message hidden" id="login-message" role="alert"></div>
+            <button class="primary-button auth-submit" type="submit">Log In</button>
+          </form>
+          <p class="auth-switch">Don’t have an account? <button id="show-register" type="button">Sign Up</button></p>
+        </div>
+      </div>
+    </section>
+
+    <div class="app-shell hidden" id="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="RAB dan TOR">
+          <span>RAB <span class="brand-light">&amp; TOR</span></span>
+        </a>
+        <div class="institution-logos" aria-label="Balmon, Direktorat Jenderal Infrastruktur Digital, dan Komdigi">
+          <img class="logo-balmon" src="/image/balmon.png" alt="Balai Monitor Spektrum Frekuensi Radio Surabaya">
+          <span class="logo-divider" aria-hidden="true"></span>
+          <img class="logo-djid" src="/image/djid.png" alt="Direktorat Jenderal Infrastruktur Digital">
+          <img class="logo-komdigi" src="/image/komdigi.png" alt="Kementerian Komunikasi dan Digital">
+        </div>
+        <div class="workspace-label">RUANG KERJA</div>
+        <div class="workspace-card">
+          <span><strong>RAB & TOR</strong></span>
+        </div>
+        <div class="sidebar-label">MENU</div>
+        <nav class="side-nav" aria-label="Menu utama">
+          <button class="nav-link active" data-tab="dashboard">Dashboard</button>
+          <button class="nav-link" data-tab="tor">Generator TOR</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="profile">
+            <span><strong>Balai Monitor SFR Kelas I Surabaya</strong></span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs"><span>Balmon Surabaya</span><span class="crumb-divider">/</span><strong id="crumb-current">Dashboard</strong></div>
+          <div class="topbar-right">
+            <div class="mobile-logos" aria-label="Balmon, Direktorat Jenderal Infrastruktur Digital, dan Komdigi">
+              <img src="/image/balmon.png" alt="Balai Monitor Spektrum Frekuensi Radio Surabaya">
+              <span aria-hidden="true"></span>
+              <img src="/image/djid.png" alt="Direktorat Jenderal Infrastruktur Digital">
+              <img src="/image/komdigi.png" alt="Kementerian Komunikasi dan Digital">
+            </div>
+            <button class="text-button logout-button" id="logout-button" type="button">Keluar</button>
+          </div>
+        </header>
+
+        <section class="page-view active" id="dashboard-view">
+          <div class="page-heading">
+            <div>
+              <h1>Ringkasan RAB</h1>
+              <p class="page-subtitle">Unggah file anggaran untuk melihat ringkasan, perbandingan, dan sisa per kategori.</p>
+            </div>
+            <button class="primary-button" id="open-upload">Unggah file RAB</button>
+          </div>
+
+          <section class="upload-panel" id="upload-panel">
+            <div class="upload-copy">
+              <span class="file-type">RAB</span>
+              <div><strong>Unggah dokumen anggaran</strong><p>Excel, CSV, Word, atau PDF. Maksimal 20 MB; hasil pindai PDF perlu OCR.</p></div>
+            </div>
+            <label class="secondary-button upload-button" for="file-input">Pilih file</label>
+            <input id="file-input" type="file" accept=".xlsx,.xls,.xlsm,.csv,.doc,.docx,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf">
+            <div class="drop-overlay" id="drop-overlay">Lepas file RAB untuk mulai membaca</div>
+          </section>
+          <div class="error-message hidden" id="error-message" role="alert"></div>
+
+          <section class="dataset-bar hidden" id="dataset-bar">
+            <div class="file-type dataset-file-type">XLSX</div>
+            <div class="dataset-meta"><strong id="file-name">—</strong><small id="file-status">Berhasil dibaca</small></div>
+            <div class="dataset-divider"></div>
+            <label for="sheet-select">Sheet</label>
+            <select id="sheet-select" aria-label="Pilih sheet workbook"></select>
+            <button class="text-button" id="replace-file">Ganti file</button>
+          </section>
+
+          <section class="dashboard-results hidden" id="dashboard-results">
+            <div class="section-heading">
+              <div><h2>Ringkasan anggaran</h2><p id="summary-caption">Angka mengikuti sheet yang dipilih.</p></div>
+              <span class="updated-label">Data diperbarui otomatis</span>
+            </div>
+            <div class="dashboard-body">
+              <div class="dashboard-primary">
+                <div class="stats-grid" id="stats-grid"></div>
+                <section class="card revision-card hidden" id="revision-card">
+                  <div class="card-heading">
+                    <div><h3>Perubahan RAB & kecukupan dana</h3><p>Perbandingan Semula → Menjadi; sisa diuji terhadap selisih kenaikan per rincian.</p></div>
+                    <span class="revision-status" id="revision-status"></span>
+                  </div>
+                  <div class="revision-summary" id="revision-summary"></div>
+                </section>
+                <section class="card chart-card column-card">
+                  <div class="card-heading">
+                    <div><h3>Pagu dan sisa per kategori</h3><p id="column-caption">Perbandingan kategori terbesar yang terdeteksi</p></div>
+                  </div>
+                  <div class="column-legend"><span><i class="legend-budget"></i>Pagu</span><span id="legend-remaining-item"><i class="legend-remaining"></i>Sisa</span></div>
+                  <div class="column-chart" id="column-chart"></div>
+                  <p class="chart-scroll-note">Geser grafik ke samping untuk melihat semua kategori.</p>
+                </section>
+                <section class="card table-card dashboard-table">
+                  <div class="card-heading table-heading">
+                    <div><h3>Data anggaran</h3><p id="table-caption">Baris bernilai yang terdeteksi</p></div>
+                    <label class="search-box"><input id="table-search" type="search" placeholder="Cari uraian..." aria-label="Cari uraian anggaran"></label>
+                  </div>
+                  <div class="table-wrap"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div>
+                  <div class="table-footer" id="table-footer"></div>
+                </section>
+              </div>
+              <aside class="dashboard-aside">
+                <section class="card chart-card donut-card">
+                  <div class="card-heading">
+                    <div><h3>Komposisi pagu</h3><p id="donut-caption">Porsi kategori anggaran yang terdeteksi</p></div>
+                  </div>
+                  <div class="donut-layout">
+                    <div class="donut-visual" id="donut-chart"></div>
+                    <div class="donut-legend" id="donut-legend"></div>
+                  </div>
+                </section>
+                <section class="card remaining-card">
+                  <div class="card-heading">
+                    <div><h3>Sisa anggaran per kategori</h3><p id="remaining-caption">Kategori dengan sisa terbesar</p></div>
+                  </div>
+                  <div class="remaining-chart" id="remaining-chart"></div>
+                </section>
+                <section class="card insights-card">
+                  <div class="card-heading">
+                    <div><h3>Temuan dari data</h3><p>Ringkasan dari sheet terpilih</p></div>
+                  </div>
+                  <div class="insight-list" id="insight-list"></div>
+                  <div class="demo-note">Grafik mencakup kategori yang dikenali; subtotal induk tidak dihitung ulang.</div>
+                </section>
+              </aside>
+            </div>
+          </section>
+        </section>
+
+        <section class="page-view" id="tor-view">
+          <div class="page-heading tor-heading">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span> DARI RAB MENJADI RENCANA</div>
+              <h1>Generator <span>TOR</span></h1>
+              <p class="page-subtitle">Susun draft Kerangka Acuan Kerja dari kegiatan dan nilai yang terbaca di RAB.</p>
+            </div>
+            <button class="primary-button" id="generate-tor">Buat draft TOR</button>
+          </div>
+          <div class="tor-layout">
+            <section class="card tor-form-card">
+              <div class="card-heading">
+                <div><h3>Informasi kegiatan</h3><p>Sesuaikan detail sebelum membuat draft</p></div>
+              </div>
+              <div class="form-stack">
+                <label>Nama kegiatan<input id="activity-input" type="text" placeholder="Unggah RAB untuk mengisi otomatis"></label>
+                <div class="form-row">
+                  <label>Lokasi<input id="location-input" type="text" placeholder="Contoh: Kota Surabaya"></label>
+                  <label>Tahun pelaksanaan<input id="year-input" type="text" placeholder="2026"></label>
+                </div>
+                <label>Tujuan / catatan khusus<textarea id="notes-input" rows="4" placeholder="Tambahkan konteks atau arahan yang perlu masuk ke TOR..."></textarea><small>Catatan ini akan disertakan dalam draft.</small></label>
+              </div>
+              <div class="source-summary" id="source-summary">
+                <div><strong>Belum ada RAB terhubung</strong><p>Unggah file di tab Dashboard untuk menarik angka ke sini.</p></div>
+              </div>
+              <div class="generator-note"><p>Draft memakai format TOR standar dan data yang terbaca di RAB. Periksa kembali substansi dan angka sebelum digunakan resmi.</p></div>
+            </section>
+            <section class="card preview-card">
+              <div class="preview-top">
+                <div><span class="preview-label">Pratinjau dokumen</span><h3>Kerangka Acuan Kerja</h3></div>
+                <button class="secondary-button export-button" id="export-tor" disabled>Unduh .DOCX</button>
+              </div>
+              <div class="preview-placeholder" id="preview-placeholder">
+                <strong>Draft TOR akan muncul di sini</strong>
+                <p>Lengkapi informasi kegiatan lalu pilih <b>Buat draft TOR</b>.</p>
+              </div>
+              <article class="tor-document hidden" id="tor-document"></article>
+            </section>
+          </div>
+        </section>
+
+        <footer class="page-footer"><span>Balai Monitor SFR Kelas I Surabaya</span><span>•</span><span>Draft dan insight perlu ditinjau sebelum digunakan secara resmi.</span></footer>
+      </main>
+    </div>
+  </body>
+</html>

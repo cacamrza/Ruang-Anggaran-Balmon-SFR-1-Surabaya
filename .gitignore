@@ -1,0 +1,10 @@
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.data/
+*.sqlite3
+.env
+.streamlit/secrets.toml
+
+/~$*.docx
