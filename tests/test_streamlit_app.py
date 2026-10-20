@@ -12,6 +12,11 @@ def render_tor_test_app():
     app_module.render_tor(("RAB", app_module.st.session_state["test_analysis"]))
 
 
+def render_dashboard_test_app():
+    import streamlit_app as app_module
+    app_module.render_dashboard(("RAB", app_module.st.session_state["test_analysis"]))
+
+
 class StreamlitAppTests(unittest.TestCase):
     def test_dashboard_opens_without_login_or_signup(self):
         app = AppTest.from_file(streamlit_app.__file__).run(timeout=20)
@@ -155,6 +160,95 @@ A Perjalanan dinas 1.0 paket 1,500,000
             {category["Tingkat"] for category in all_categories},
             {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
         )
+
+    def test_budget_cards_aggregate_values_for_selected_hierarchy(self):
+        workplan = streamlit_app.parse_rincian_kertas_text(["""
+RINCIAN KERTAS KERJA SATKER T.A. 2026
+ALOKASI Rp. 3,000,000
+059.09.GL Program utama 1.0 program 3,000,000
+7437 Kegiatan utama 1.0 kegiatan 3,000,000
+7437.BAH KRO utama 1.0 layanan 3,000,000
+7437.BAH.078 RO pertama 1.0 layanan 1,000,000
+101 Komponen pertama 1.0 paket 1,000,000
+- Rincian terblokir 100,000 *
+7437.BAH.079 RO kedua 1.0 layanan 2,000,000
+102 Komponen kedua 1.0 paket 2,000,000
+"""])
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 3,000,000 0 1,100,000 0 1,100,000 36.67 % 1,900,000
+BAH.078 RO pertama 1,000,000 0 300,000 0 300,000 30.00 % 700,000
+BAH.079 RO kedua 2,000,000 0 800,000 0 800,000 40.00 % 1,200,000
+"""])
+        rows = streamlit_app.combine_budget_documents([
+            ("Rincian Kertas Kerja", workplan),
+            ("Laporan FA Detail", financial),
+        ])
+        analysis = streamlit_app.analyze_rows(rows, "RAB")
+
+        program_totals = streamlit_app.hierarchy_budget_totals(analysis, "PROGRAM")
+        self.assertEqual(program_totals, {
+            "pagu_penuh": 3000000,
+            "pagu_terblokir": 100000,
+            "pagu_efektif": 3000000,
+            "realisasi": 1100000,
+            "sisa": 1900000,
+        })
+
+        component_totals = streamlit_app.hierarchy_budget_totals(analysis, "KOMPONEN")
+        self.assertEqual(component_totals, {
+            "pagu_penuh": 3000000,
+            "pagu_terblokir": 100000,
+            "pagu_efektif": None,
+            "realisasi": None,
+            "sisa": None,
+        })
+
+    def test_budget_cards_and_labels_follow_selected_hierarchy(self):
+        workplan = streamlit_app.parse_rincian_kertas_text(["""
+RINCIAN KERTAS KERJA SATKER T.A. 2026
+ALOKASI Rp. 3,000,000
+059.09.GL Program utama 1.0 program 3,000,000
+7437 Kegiatan utama 1.0 kegiatan 3,000,000
+7437.BAH KRO utama 1.0 layanan 3,000,000
+7437.BAH.078 RO pertama 1.0 layanan 1,000,000
+101 Komponen pertama 1.0 paket 1,000,000
+- Rincian terblokir 100,000 *
+7437.BAH.079 RO kedua 1.0 layanan 2,000,000
+102 Komponen kedua 1.0 paket 2,000,000
+"""])
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 3,000,000 0 1,100,000 0 1,100,000 36.67 % 1,900,000
+BAH.078 RO pertama 1,000,000 0 300,000 0 300,000 30.00 % 700,000
+BAH.079 RO kedua 2,000,000 0 800,000 0 800,000 40.00 % 1,200,000
+"""])
+        rows = streamlit_app.combine_budget_documents([
+            ("Rincian Kertas Kerja", workplan),
+            ("Laporan FA Detail", financial),
+        ])
+        analysis = streamlit_app.analyze_rows(rows, "RAB")
+        app = AppTest.from_function(render_dashboard_test_app)
+        app.session_state["test_analysis"] = analysis
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any(
+            item.label == "Pagu efektif · RO" and item.value == "3 jt"
+            for item in app.metric
+        ))
+        app.selectbox[0].select("KOMPONEN")
+        app.run(timeout=30)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any(
+            item.label == "Pagu penuh · Komponen" and item.value == "3 jt"
+            for item in app.metric
+        ))
+        self.assertTrue(any(
+            item.label == "Pagu efektif · Komponen" and item.value == "—"
+            for item in app.metric
+        ))
 
     def test_tor_uses_template_and_edits_only_requested_sections(self):
         workplan = streamlit_app.parse_rincian_kertas_text(["""

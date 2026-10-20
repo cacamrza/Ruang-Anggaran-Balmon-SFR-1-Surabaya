@@ -1198,6 +1198,72 @@ def load_analysis():
     return chosen, analysis
 
 
+def hierarchy_budget_totals(analysis, selected_level):
+    comparison = analysis.get("budget_comparison")
+    if not comparison:
+        return None
+    if selected_level == "ALL":
+        return comparison
+
+    categories = analysis.get("category_levels", {}).get(selected_level, [])
+    selected_label = BUDGET_LEVEL_LABELS.get(selected_level)
+    selected_codes = {category["Kode"] for category in categories}
+    rows = analysis.get("rows", [])
+    selected_rows = [
+        row for row in rows
+        if row["Tingkat"] == selected_label and row["Kode"] in selected_codes
+    ]
+
+    def complete_sum(items, key):
+        values = [item.get(key) for item in items]
+        if not values or any(value is None for value in values):
+            return None
+        return sum(values)
+
+    totals = {
+        "pagu_penuh": complete_sum(selected_rows, "Pagu Penuh"),
+        "pagu_terblokir": sum(row.get("Pagu Terblokir") or 0 for row in selected_rows),
+        "pagu_efektif": None,
+        "realisasi": None,
+        "sisa": None,
+    }
+
+    parent_level = {
+        "RO": "KRO",
+        "KRO": "Kegiatan",
+        "Kegiatan": "Program",
+    }
+    if selected_level not in ("PROGRAM", "KEGIATAN", "KRO", "RO"):
+        return totals
+
+    rows_by_level_code = {
+        (row["Tingkat"], row["Kode"]): row
+        for row in rows
+        if row["Kode"]
+    }
+    descendant_ros = []
+    matched_selected_codes = set()
+    for ro in (row for row in rows if row["Tingkat"] == "RO"):
+        current = ro
+        while current:
+            if current["Tingkat"] == selected_label and current["Kode"] in selected_codes:
+                descendant_ros.append(ro)
+                matched_selected_codes.add(current["Kode"])
+                break
+            next_level = parent_level.get(current["Tingkat"])
+            if not next_level:
+                break
+            current = rows_by_level_code.get((next_level, current["Induk"]))
+
+    if selected_codes.issubset(matched_selected_codes):
+        totals.update({
+            "pagu_efektif": complete_sum(descendant_ros, "Pagu Efektif"),
+            "realisasi": complete_sum(descendant_ros, "Realisasi"),
+            "sisa": complete_sum(descendant_ros, "Sisa anggaran"),
+        })
+    return totals
+
+
 def render_dashboard(data):
     if not data:
         return
@@ -1215,7 +1281,7 @@ def render_dashboard(data):
         default_level = analysis.get("default_category_level")
         level_index = level_options.index(default_level) if default_level in level_options else 0
         selected_level = st.selectbox(
-            "Tingkat hierarki untuk grafik",
+            "Tingkat hierarki untuk grafik dan kartu anggaran",
             level_options,
             index=level_index,
             format_func=lambda level: "Semua level" if level == "ALL" else BUDGET_LEVEL_LABELS.get(level, level.title()),
@@ -1227,21 +1293,45 @@ def render_dashboard(data):
         categories = analysis.get("categories", [])
     has_fa_comparison = bool(comparison and comparison.get("pagu_efektif") is not None)
     if comparison:
+        selected_totals = hierarchy_budget_totals(analysis, selected_level)
+        level_label = (
+            "semua level" if selected_level == "ALL"
+            else BUDGET_LEVEL_LABELS.get(selected_level, "tingkat terpilih")
+        )
         metric_columns = st.columns(5)
-        metric_columns[0].metric("Pagu penuh", format_compact_rupiah(comparison["pagu_penuh"]))
-        metric_columns[1].metric("Pagu efektif", format_compact_rupiah(comparison["pagu_efektif"]))
-        metric_columns[2].metric("Pagu terblokir (*)", format_compact_rupiah(comparison["pagu_terblokir"]))
-        metric_columns[3].metric("Realisasi", format_compact_rupiah(comparison["realisasi"]))
-        metric_columns[4].metric("Sisa anggaran", format_compact_rupiah(comparison["sisa"]))
+        metric_columns[0].metric("Pagu penuh · {}".format(level_label), format_compact_rupiah(selected_totals["pagu_penuh"]))
+        metric_columns[1].metric("Pagu efektif · {}".format(level_label), format_compact_rupiah(selected_totals["pagu_efektif"]))
+        metric_columns[2].metric("Pagu terblokir (*) · {}".format(level_label), format_compact_rupiah(selected_totals["pagu_terblokir"]))
+        metric_columns[3].metric("Realisasi · {}".format(level_label), format_compact_rupiah(selected_totals["realisasi"]))
+        metric_columns[4].metric("Sisa anggaran · {}".format(level_label), format_compact_rupiah(selected_totals["sisa"]))
+        if selected_level == "ALL":
+            st.caption("Semua level dipilih. Kartu menampilkan total satker, bukan penjumlahan baris lintas hierarki.")
+        elif selected_level not in ("PROGRAM", "KEGIATAN", "KRO", "RO"):
+            st.caption("Pagu efektif, realisasi, dan sisa hanya tersedia per RO; nilai tersebut tidak dialokasikan ke tingkat {}.".format(
+                level_label.lower()
+            ))
+        else:
+            st.caption("Pagu efektif, realisasi, dan sisa dijumlahkan dari RO di bawah tingkat {} yang dipilih.".format(
+                level_label.lower()
+            ))
         st.caption("{} kode RO cocok; {} kode belum memiliki pasangan antarfile.".format(
             comparison["matched_count"], comparison["unmatched_count"]
         ))
     else:
-        pagu_for_card = analysis.get("category_total") if categories else analysis.get("pagu_total")
-        remaining_for_card = analysis.get("category_remaining_total") if categories else analysis.get("remaining_total")
+        if selected_level == "ALL":
+            pagu_for_card = analysis.get("pagu_total")
+            remaining_for_card = analysis.get("remaining_total")
+        else:
+            pagu_for_card = sum(row["Pagu"] for row in categories) if categories else analysis.get("pagu_total")
+            remaining_values = [row["Sisa"] for row in categories if row["Sisa"] is not None]
+            remaining_for_card = sum(remaining_values) if categories else analysis.get("remaining_total")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total pagu kategori", format_compact_rupiah(pagu_for_card))
-        col2.metric("Sisa anggaran", format_compact_rupiah(remaining_for_card))
+        category_label = (
+            "semua level" if selected_level == "ALL"
+            else BUDGET_LEVEL_LABELS.get(selected_level, "kategori")
+        )
+        col1.metric("Total pagu · {}".format(category_label), format_compact_rupiah(pagu_for_card))
+        col2.metric("Sisa anggaran · {}".format(category_label), format_compact_rupiah(remaining_for_card))
         col3.metric("Baris pada tingkat terpilih", len(categories))
         col4.metric("Rincian bernilai", len(analysis["rows"]))
 
@@ -1267,6 +1357,8 @@ def render_dashboard(data):
 
     if categories:
         chart_frame = pd.DataFrame(categories)
+        chart_frame["Pagu"] = pd.to_numeric(chart_frame["Pagu"], errors="coerce")
+        chart_frame["Sisa"] = pd.to_numeric(chart_frame["Sisa"], errors="coerce")
         if selected_level == "ALL":
             st.info("Grafik menampilkan baris dari semua tingkat; nilai induk dan anak tidak dijumlahkan menjadi total.")
         st.markdown("### {} terbesar per {}".format(
@@ -1384,8 +1476,9 @@ def render_dashboard(data):
                 legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=0.68, font=dict(size=12)),
             )
             st.plotly_chart(pie, use_container_width=True)
-            remaining = chart_frame.dropna(subset=["Sisa"]).nlargest(8, "Sisa")
+            remaining = chart_frame.dropna(subset=["Sisa"]).copy()
             if not remaining.empty:
+                remaining = remaining.nlargest(8, "Sisa")
                 st.markdown("### Sisa anggaran terbesar")
                 remaining = remaining.sort_values("Sisa")
                 remaining_divisor = 1_000_000_000 if remaining["Sisa"].max() >= 1_000_000_000 else 1_000_000 if remaining["Sisa"].max() >= 1_000_000 else 1
