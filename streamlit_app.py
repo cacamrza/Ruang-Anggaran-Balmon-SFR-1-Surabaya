@@ -33,7 +33,6 @@ BUDGET_LEVEL_LABELS = {
     "RO": "RO",
     "KOMPONEN": "Komponen",
     "SUBKOMPONEN": "Subkomponen",
-    "AKUN": "Akun belanja",
     "DETIL": "Detil belanja",
 }
 
@@ -217,10 +216,9 @@ def parse_rincian_kertas_text(pages_text):
         ("RO", re.compile(r"^(?P<code>\d{4}\.[A-Z0-9]{3}\.[A-Z0-9]{3})\s+(?P<description>.*)$", re.I)),
         ("KRO", re.compile(r"^(?P<code>\d{4}\.[A-Z0-9]{3})\s+(?P<description>.*)$", re.I)),
         ("KEGIATAN", re.compile(r"^(?P<code>\d{4})\s+(?P<description>.*)$", re.I)),
-        ("AKUN", re.compile(r"^(?P<code>\d{6})\s+(?P<description>.*)$")),
+        ("DETIL", re.compile(r"^(?P<code>\d{6})\s+(?P<description>.*)$")),
         ("KOMPONEN", re.compile(r"^(?P<code>\d{3})\s+(?P<description>.*)$")),
         ("SUBKOMPONEN", re.compile(r"^(?P<code>[A-Z])\s+(?P<description>.*)$")),
-        ("DETIL", re.compile(r"^(?P<description>[-•]\s+.*)$")),
     )
     parent_levels = {
         "PROGRAM": None,
@@ -229,17 +227,15 @@ def parse_rincian_kertas_text(pages_text):
         "RO": "KRO",
         "KOMPONEN": "RO",
         "SUBKOMPONEN": "KOMPONEN",
-        "AKUN": "SUBKOMPONEN",
-        "DETIL": "AKUN",
+        "DETIL": "SUBKOMPONEN",
     }
     descendants = {
-        "PROGRAM": ("KEGIATAN", "KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
-        "KEGIATAN": ("KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
-        "KRO": ("RO", "KOMPONEN", "SUBKOMPONEN", "AKUN"),
-        "RO": ("KOMPONEN", "SUBKOMPONEN", "AKUN"),
-        "KOMPONEN": ("SUBKOMPONEN", "AKUN"),
-        "SUBKOMPONEN": ("AKUN",),
-        "AKUN": (),
+        "PROGRAM": ("KEGIATAN", "KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "DETIL"),
+        "KEGIATAN": ("KRO", "RO", "KOMPONEN", "SUBKOMPONEN", "DETIL"),
+        "KRO": ("RO", "KOMPONEN", "SUBKOMPONEN", "DETIL"),
+        "RO": ("KOMPONEN", "SUBKOMPONEN", "DETIL"),
+        "KOMPONEN": ("SUBKOMPONEN", "DETIL"),
+        "SUBKOMPONEN": ("DETIL",),
         "DETIL": (),
     }
     total_allocation = None
@@ -262,6 +258,15 @@ def parse_rincian_kertas_text(pages_text):
             ):
                 continue
 
+            if re.match(r"^[-•]\s+", text):
+                amounts = list(amount_pattern.finditer(text))
+                if text.endswith("*") and amounts:
+                    blocked = to_number(amounts[-1].group(0))
+                    blocked_total += blocked or 0
+                    for ancestor in current.values():
+                        ancestor[5] = (ancestor[5] or 0) + (blocked or 0)
+                continue
+
             matched = next(
                 ((kind, code_match) for kind, pattern in patterns if (code_match := pattern.match(text))),
                 None,
@@ -276,9 +281,6 @@ def parse_rincian_kertas_text(pages_text):
                 amount = to_number(amounts[-1].group(0)) if amounts else None
                 parent_level = parent_levels[kind]
                 parent = current.get(parent_level) if parent_level else None
-                if kind == "AKUN" and parent is None:
-                    parent = current.get("KOMPONEN")
-                blocked = amount if kind == "DETIL" and text.endswith("*") else None
                 row = [
                     kind,
                     code,
@@ -295,10 +297,6 @@ def parse_rincian_kertas_text(pages_text):
                 current[kind] = row
                 for descendant in descendants[kind]:
                     current.pop(descendant, None)
-                if blocked is not None:
-                    blocked_total += blocked
-                    for ancestor in current.values():
-                        ancestor[5] = (ancestor[5] or 0) + blocked
                 continue
 
             if current and not amount_pattern.search(text) and not re.match(r"^[A-Z]\s", text):
@@ -711,6 +709,7 @@ def analyze_budget_rows(rows, sheet_name):
     for kind, label in BUDGET_LEVEL_LABELS.items():
         categories = [
             {
+                "Tingkat": label,
                 "Kode": row["Kode"],
                 "Kategori": "{}{}{}".format(
                     "{} · ".format(row["Kode"]) if row["Kode"] else "",
@@ -730,6 +729,15 @@ def analyze_budget_rows(rows, sheet_name):
         if categories:
             categories.sort(key=lambda row: row["Pagu"], reverse=True)
             category_levels[kind] = categories
+    category_levels["ALL"] = sorted(
+        [
+            dict(category, Kategori="{} · {}".format(category["Tingkat"], category["Kategori"]))
+            for categories in category_levels.values()
+            for category in categories
+        ],
+        key=lambda row: row["Pagu"],
+        reverse=True,
+    )
     default_level = next(
         (kind for kind in ("AKUN", "DETIL", "RO", "KEGIATAN", "PROGRAM") if kind in category_levels),
         next(iter(category_levels), None),
@@ -1133,7 +1141,7 @@ def load_analysis():
                     if len(set(document_types)) != len(document_types):
                         raise ValueError("Pilih satu Rincian Kertas Kerja dan satu Laporan FA Detail, bukan dua file dengan jenis yang sama.")
                     source_tables.insert(0, (
-                        "Perbandingan Anggaran RO",
+                        "Perbandingan Anggaran",
                         combine_budget_documents(special_documents),
                     ))
                 if not source_tables or not any(
@@ -1194,14 +1202,14 @@ def render_dashboard(data):
     comparison = analysis.get("budget_comparison")
     category_levels = analysis.get("category_levels", {})
     if category_levels:
-        level_options = list(category_levels)
+        level_options = ["ALL"] + [level for level in category_levels if level != "ALL"]
         default_level = analysis.get("default_category_level")
         level_index = level_options.index(default_level) if default_level in level_options else 0
         selected_level = st.selectbox(
             "Tingkat hierarki untuk grafik",
             level_options,
             index=level_index,
-            format_func=lambda level: BUDGET_LEVEL_LABELS.get(level, level.title()),
+            format_func=lambda level: "Semua level" if level == "ALL" else BUDGET_LEVEL_LABELS.get(level, level.title()),
             key="budget_hierarchy_level",
         )
         categories = category_levels[selected_level]
@@ -1250,9 +1258,11 @@ def render_dashboard(data):
 
     if categories:
         chart_frame = pd.DataFrame(categories)
+        if selected_level == "ALL":
+            st.info("Grafik menampilkan baris dari semua tingkat; nilai induk dan anak tidak dijumlahkan menjadi total.")
         st.markdown("### {} terbesar per {}".format(
             "Pagu efektif" if has_fa_comparison and selected_level == "RO" else "Pagu",
-            BUDGET_LEVEL_LABELS.get(selected_level, "kategori").lower() if selected_level else "kategori",
+            "semua level" if selected_level == "ALL" else BUDGET_LEVEL_LABELS.get(selected_level, "kategori").lower() if selected_level else "kategori",
         ))
         pagu_data = chart_frame.nlargest(10, "Pagu").sort_values("Pagu")
         axis_divisor = 1_000_000_000 if pagu_data["Pagu"].max() >= 1_000_000_000 else 1_000_000 if pagu_data["Pagu"].max() >= 1_000_000 else 1
@@ -1328,79 +1338,80 @@ def render_dashboard(data):
                 st.markdown("### Perbandingan pagu dan realisasi per RO")
                 st.plotly_chart(comparison_fig, use_container_width=True)
 
-        st.markdown("### Porsi {} ".format("pagu efektif" if has_fa_comparison and selected_level == "RO" else "pagu"))
-        pie_data = chart_frame.nlargest(5, "Pagu").copy()
-        pie_data["Label"] = pie_data.apply(
-            lambda row: row["Kode"] or row["Kategori"][:24],
-            axis=1,
-        )
-        if len(chart_frame) > 5:
-            other = chart_frame.nsmallest(len(chart_frame) - 5, "Pagu")["Pagu"].sum()
-            pie_data = pd.concat(
-                [
-                    pie_data,
-                    pd.DataFrame([{"Kategori": "Kategori lainnya", "Label": "Lainnya", "Pagu": other}]),
-                ],
-                ignore_index=True,
+        if selected_level != "ALL":
+            st.markdown("### Porsi {} ".format("pagu efektif" if has_fa_comparison and selected_level == "RO" else "pagu"))
+            pie_data = chart_frame.nlargest(5, "Pagu").copy()
+            pie_data["Label"] = pie_data.apply(
+                lambda row: row["Kode"] or row["Kategori"][:24],
+                axis=1,
             )
-        pie = px.pie(
-            pie_data,
-            values="Pagu",
-            names="Label",
-            hole=0.58,
-            color_discrete_sequence=COLORS,
-            custom_data=["Kategori"],
-        )
-        pie.update_traces(
-            textposition="inside",
-            textinfo="percent",
-            hovertemplate="%{customdata[0]}<br>Rp %{value:,.0f} (%{percent})<extra></extra>",
-            sort=True,
-        )
-        pie.update_layout(
-            height=410,
-            margin=dict(l=10, r=240, t=10, b=10),
-            legend_title=None,
-            legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=0.68, font=dict(size=12)),
-        )
-        st.plotly_chart(pie, use_container_width=True)
-        remaining = chart_frame.dropna(subset=["Sisa"]).nlargest(8, "Sisa")
-        if not remaining.empty:
-            st.markdown("### Sisa anggaran terbesar")
-            remaining = remaining.sort_values("Sisa")
-            remaining_divisor = 1_000_000_000 if remaining["Sisa"].max() >= 1_000_000_000 else 1_000_000 if remaining["Sisa"].max() >= 1_000_000 else 1
-            remaining_unit = "miliar" if remaining_divisor == 1_000_000_000 else "juta" if remaining_divisor == 1_000_000 else "rupiah"
-            remaining_suffix = " M" if remaining_divisor == 1_000_000_000 else " jt" if remaining_divisor == 1_000_000 else ""
-            remaining = remaining.assign(
-                **{
-                    "Sisa (skala)": remaining["Sisa"] / remaining_divisor,
-                    "Label ringkas": remaining["Sisa"].map(format_compact_rupiah),
-                }
+            if len(chart_frame) > 5:
+                other = chart_frame.nsmallest(len(chart_frame) - 5, "Pagu")["Pagu"].sum()
+                pie_data = pd.concat(
+                    [
+                        pie_data,
+                        pd.DataFrame([{"Kategori": "Kategori lainnya", "Label": "Lainnya", "Pagu": other}]),
+                    ],
+                    ignore_index=True,
+                )
+            pie = px.pie(
+                pie_data,
+                values="Pagu",
+                names="Label",
+                hole=0.58,
+                color_discrete_sequence=COLORS,
+                custom_data=["Kategori"],
             )
-            bar = px.bar(
-                remaining,
-                x="Sisa (skala)",
-                y="Kategori",
-                orientation="h",
-                text="Label ringkas",
-                color_discrete_sequence=[COLORS[1]],
-                custom_data=["Sisa"],
+            pie.update_traces(
+                textposition="inside",
+                textinfo="percent",
+                hovertemplate="%{customdata[0]}<br>Rp %{value:,.0f} (%{percent})<extra></extra>",
+                sort=True,
             )
-            bar.update_traces(
-                textposition="outside",
-                cliponaxis=False,
-                hovertemplate="%{y}<br>Sisa: Rp %{customdata[0]:,.0f}<extra></extra>",
+            pie.update_layout(
+                height=410,
+                margin=dict(l=10, r=240, t=10, b=10),
+                legend_title=None,
+                legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=0.68, font=dict(size=12)),
             )
-            bar.update_layout(
-                height=max(280, min(440, 48 * len(remaining))),
-                xaxis_title="Sisa (Rp {})".format(remaining_unit),
-                separators=",.",
-                xaxis=dict(ticksuffix=remaining_suffix),
-                yaxis_title=None,
-                showlegend=False,
-                margin=dict(l=10, r=45, t=10, b=40),
-            )
-            st.plotly_chart(bar, use_container_width=True)
+            st.plotly_chart(pie, use_container_width=True)
+            remaining = chart_frame.dropna(subset=["Sisa"]).nlargest(8, "Sisa")
+            if not remaining.empty:
+                st.markdown("### Sisa anggaran terbesar")
+                remaining = remaining.sort_values("Sisa")
+                remaining_divisor = 1_000_000_000 if remaining["Sisa"].max() >= 1_000_000_000 else 1_000_000 if remaining["Sisa"].max() >= 1_000_000 else 1
+                remaining_unit = "miliar" if remaining_divisor == 1_000_000_000 else "juta" if remaining_divisor == 1_000_000 else "rupiah"
+                remaining_suffix = " M" if remaining_divisor == 1_000_000_000 else " jt" if remaining_divisor == 1_000_000 else ""
+                remaining = remaining.assign(
+                    **{
+                        "Sisa (skala)": remaining["Sisa"] / remaining_divisor,
+                        "Label ringkas": remaining["Sisa"].map(format_compact_rupiah),
+                    }
+                )
+                bar = px.bar(
+                    remaining,
+                    x="Sisa (skala)",
+                    y="Kategori",
+                    orientation="h",
+                    text="Label ringkas",
+                    color_discrete_sequence=[COLORS[1]],
+                    custom_data=["Sisa"],
+                )
+                bar.update_traces(
+                    textposition="outside",
+                    cliponaxis=False,
+                    hovertemplate="%{y}<br>Sisa: Rp %{customdata[0]:,.0f}<extra></extra>",
+                )
+                bar.update_layout(
+                    height=max(280, min(440, 48 * len(remaining))),
+                    xaxis_title="Sisa (Rp {})".format(remaining_unit),
+                    separators=",.",
+                    xaxis=dict(ticksuffix=remaining_suffix),
+                    yaxis_title=None,
+                    showlegend=False,
+                    margin=dict(l=10, r=45, t=10, b=40),
+                )
+                st.plotly_chart(bar, use_container_width=True)
     st.markdown("### Temuan dari data")
     for insight in analysis.get("insights", []):
         st.markdown("- " + insight)

@@ -128,17 +128,28 @@ A Perjalanan dinas 1.0 paket 1,500,000
 
         self.assertEqual(
             set(rows_by_level),
-            {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Akun belanja", "Detil belanja"},
+            {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
         )
         self.assertEqual(rows_by_level["Program"]["Kode"], "059.09.GL")
         self.assertEqual(rows_by_level["Kegiatan"]["Kode"], "7437")
-        self.assertEqual(rows_by_level["Akun belanja"]["Kode"], "521115")
+        self.assertEqual(rows_by_level["Komponen"]["Kode"], "101")
+        self.assertEqual(rows_by_level["Subkomponen"]["Kode"], "A")
+        self.assertEqual(rows_by_level["Detil belanja"]["Kode"], "521115")
         self.assertEqual(rows_by_level["Detil belanja"]["Pagu Terblokir"], 1500000)
         self.assertEqual(rows_by_level["Kegiatan"]["Induk"], "059.09.GL")
-        self.assertEqual(rows_by_level["Detil belanja"]["Induk"], "521115")
+        self.assertEqual(rows_by_level["Detil belanja"]["Induk"], "A")
         self.assertEqual(analysis["hierarchy_counts"]["DETIL"], 1)
-        self.assertIn("AKUN", analysis["category_levels"])
         self.assertIn("DETIL", analysis["category_levels"])
+        self.assertNotIn("AKUN", analysis["category_levels"])
+        all_categories = analysis["category_levels"]["ALL"]
+        self.assertEqual(
+            len(all_categories),
+            sum(len(categories) for level, categories in analysis["category_levels"].items() if level != "ALL"),
+        )
+        self.assertEqual(
+            {category["Tingkat"] for category in all_categories},
+            {"Program", "Kegiatan", "KRO", "RO", "Komponen", "Subkomponen", "Detil belanja"},
+        )
 
     def test_tor_download_is_a_valid_word_document(self):
         analysis = {
