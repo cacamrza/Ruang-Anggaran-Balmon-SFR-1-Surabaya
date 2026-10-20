@@ -1556,8 +1556,6 @@ def apply_fa_remaining_to_revision(revision, fa_analyses):
                 fa_paths.append(path)
 
     for change in revision["changes"]:
-        if change["Selisih"] <= 0:
-            continue
         kind = next(
             (level for level, label in BUDGET_LEVEL_LABELS.items() if label == change["Tingkat"]),
             None,
@@ -1681,9 +1679,15 @@ def apply_fa_remaining_to_revision(revision, fa_analyses):
             if change["Selisih"] > 0 and remaining is not None
             else None
         )
-        status = "unknown" if remaining is None else "enough" if remaining > change["Selisih"] else "short"
+        status = (
+            "decrease" if change["Selisih"] < 0
+            else "unknown" if remaining is None
+            else "enough" if remaining > change["Selisih"]
+            else "short"
+        )
         change["_status"] = status
         change["Kecukupan"] = {
+            "decrease": "Pengurangan",
             "enough": "Sisa cukup",
             "short": "Sisa tidak lebih besar",
             "unknown": "Sisa FA tidak ditemukan",
@@ -2045,8 +2049,6 @@ def render_dashboard(data):
         )
         if revision["changes"]:
             revision_frame = pd.DataFrame(revision["changes"]).drop(columns=["_status", "_path"], errors="ignore")
-            remaining_label = "Sisa FA" if has_fa_source else "Sisa anggaran"
-            revision_frame = revision_frame.rename(columns={"Sisa anggaran": remaining_label})
             st.dataframe(revision_frame, use_container_width=True, hide_index=True)
 
     if categories:

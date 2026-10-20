@@ -214,6 +214,54 @@ BAH.078 RO 500 0 100 0 100 20.00 % 400
         self.assertEqual(item["Basis pasangan FA"], "Uraian rincian cocok")
         self.assertEqual(item["Sumber Sisa FA"], "Laporan FA Detail")
 
+    def test_combined_upload_uses_fa_remaining_for_decreased_budget_rows(self):
+        revision_rows = [
+            ["", "Semula", None, None, "Menjadi", None, None, None],
+            [None, "Kode Anggaran", "Uraian", "Jumlah", "Kode Anggaran", "Uraian", "Jumlah", "Selisih"],
+            [None, "059.GL", "Program", 500, "059.GL", "Program", 500, 0],
+            [None, "7437", "Kegiatan", 500, "7437", "Kegiatan", 500, 0],
+            [None, "7437.BAH", "KRO", 500, "7437.BAH", "KRO", 500, 0],
+            [None, "7437.BAH.078", "RO", 500, "7437.BAH.078", "RO", 500, 0],
+            [None, "100", "Komponen", 500, "100", "Komponen", 450, -50],
+        ]
+        financial = streamlit_app.parse_fa_text(["""
+LAPORAN REALISASI SP2D TA 2026
+JUMLAH SELURUHNYA 500 0 100 0 100 20.00 % 400
+GL Program 500 0 100 0 100 20.00 % 400
+GL.7437 Kegiatan 500 0 100 0 100 20.00 % 400
+BAH KRO 500 0 100 0 100 20.00 % 400
+BAH.078 RO 500 0 100 0 100 20.00 % 400
+100 Komponen 500 0 100 0 100 20.00 % 400
+"""])
+
+        combined = streamlit_app.analyze_combined_tables([
+            ("Revisi Excel", revision_rows),
+            ("Laporan FA Detail", financial),
+        ])
+        component = next(
+            row for row in combined["revision"]["changes"]
+            if row["Tingkat"] == "Komponen"
+        )
+
+        self.assertEqual(component["Pagu semula"], 500)
+        self.assertEqual(component["Pagu menjadi"], 450)
+        self.assertEqual(component["Selisih"], -50)
+        self.assertEqual(component["Sisa anggaran"], 400)
+        self.assertEqual(component["Sumber Sisa FA"], "Laporan FA Detail")
+        self.assertEqual(component["Kecukupan"], "Pengurangan")
+        self.assertIsNone(component["Sisa setelah kenaikan"])
+
+        app = AppTest.from_function(render_dashboard_test_app)
+        app.session_state["test_analysis"] = combined
+        app.run(timeout=30)
+        frame = next(
+            item.value for item in app.dataframe
+            if "Pagu semula" in item.value.columns
+        )
+        self.assertIn("Sisa anggaran", frame.columns)
+        self.assertNotIn("Sisa FA", frame.columns)
+        self.assertIsNone(frame.iloc[0]["Sisa setelah kenaikan"])
+
     def test_combined_upload_uses_nearest_fa_ancestor_when_item_is_not_reported(self):
         revision_rows = [
             ["", "Semula", None, None, "Menjadi", None, None, None],
@@ -258,7 +306,8 @@ BAH.078 RO 500 0 100 0 100 20.00 % 400
             frame.value for frame in app.dataframe
             if "Pagu semula" in frame.value.columns
         )
-        self.assertIn("Sisa FA", change_table.columns)
+        self.assertIn("Sisa anggaran", change_table.columns)
+        self.assertNotIn("Sisa FA", change_table.columns)
         self.assertIn("Basis pasangan FA", change_table.columns)
 
     def test_dashboard_analysis_prepares_rows_and_categories(self):
