@@ -36,6 +36,75 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(streamlit_app.format_compact_rupiah(17_100_000_000), "17,1 M")
         self.assertEqual(streamlit_app.format_compact_rupiah(1_260_000), "1,3 jt")
 
+    def test_budget_editor_formats_currency_and_marks_rows_for_review(self):
+        rows = [
+            {
+                "Baris": 4,
+                "Kode": "7437.BAH.078",
+                "Uraian": "Layanan Dukungan",
+                "Pagu": 1_500_000,
+                "Sisa anggaran": 1_600_000,
+                "Status Pasangan": "Hanya di RAB",
+            },
+        ]
+
+        frame, money_columns = streamlit_app.budget_editor_frame(rows)
+        styled = streamlit_app.style_budget_editor(frame).to_html()
+
+        self.assertIn("Pagu", money_columns)
+        self.assertEqual(frame.iloc[0]["Pagu"], "Rp 1.500.000")
+        self.assertEqual(frame.iloc[0]["Sisa anggaran"], "Rp 1.600.000")
+        self.assertIn("Perlu tinjauan", frame.iloc[0]["Tinjauan"])
+        self.assertIn("#fee2e2", styled)
+
+    def test_budget_editor_updates_pagu_used_by_tor(self):
+        rows = [
+            ["Kode Anggaran", "Uraian", "Pagu", "Sisa Anggaran"],
+            ["7437.BAH.078", "Layanan Dukungan", 1_500_000, 250_000],
+        ]
+        analysis = streamlit_app.analyze_rows(rows, "RAB")
+        frame, money_columns = streamlit_app.budget_editor_frame(analysis["rows"])
+        frame.loc[0, "Pagu"] = "Rp 2.500.000"
+
+        changed = streamlit_app.apply_budget_edits(analysis, frame, money_columns)
+
+        self.assertTrue(changed)
+        self.assertEqual(analysis["rows"][0]["Pagu"], 2_500_000)
+        self.assertEqual(streamlit_app.tor_budget_amount(analysis["rows"][0]), 2_500_000)
+        self.assertEqual(analysis["categories"][0]["Pagu"], 2_500_000)
+
+    def test_budget_editor_updates_effective_budget_for_tor(self):
+        source_row = [
+            "PROGRAM", "059.09.GL", "Program", 1_500_000, 1_500_000,
+            0, 0, 250_000, "Cocok berdasarkan kode hierarki", "",
+        ]
+        analysis = streamlit_app.analyze_rows(
+            [streamlit_app.BUDGET_HEADERS, source_row],
+            "RAB",
+        )
+        frame, money_columns = streamlit_app.budget_editor_frame(analysis["rows"])
+        frame.loc[0, "Pagu"] = "Rp 2.500.000"
+
+        streamlit_app.apply_budget_edits(analysis, frame, money_columns)
+
+        self.assertEqual(analysis["rows"][0]["Pagu Efektif"], 2_500_000)
+        self.assertEqual(streamlit_app.tor_budget_amount(analysis["rows"][0]), 2_500_000)
+        self.assertEqual(analysis["budget_comparison"]["pagu_efektif"], 2_500_000)
+
+    def test_budget_editor_rejects_invalid_rupiah_input(self):
+        analysis = streamlit_app.analyze_rows(
+            [
+                ["Kode Anggaran", "Uraian", "Pagu", "Sisa Anggaran"],
+                ["7437.BAH.078", "Layanan Dukungan", 1_500_000, 250_000],
+            ],
+            "RAB",
+        )
+        frame, money_columns = streamlit_app.budget_editor_frame(analysis["rows"])
+        frame.loc[0, "Pagu"] = "bukan angka"
+
+        with self.assertRaisesRegex(ValueError, "format rupiah"):
+            streamlit_app.apply_budget_edits(analysis, frame, money_columns)
+
     def test_revision_compares_remaining_to_increase(self):
         rows = [
             ["", "Semula", None, None, "Menjadi", None, None, None, None],
@@ -97,7 +166,7 @@ class StreamlitAppTests(unittest.TestCase):
         )
         self.assertIn("Sisa anggaran", change_table.columns)
         self.assertIn("Sisa setelah kenaikan", change_table.columns)
-        self.assertEqual(change_table.iloc[0]["Sisa setelah kenaikan"], 25)
+        self.assertEqual(change_table.iloc[0]["Sisa setelah kenaikan"], "Rp 25")
 
     def test_revision_detects_changes_at_each_budget_hierarchy_level(self):
         rows = [

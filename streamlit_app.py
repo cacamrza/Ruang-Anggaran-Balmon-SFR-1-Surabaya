@@ -1702,7 +1702,7 @@ def apply_fa_remaining_to_revision(revision, fa_analyses):
 
 
 def format_rupiah(value):
-    if value is None:
+    if value is None or pd.isna(value):
         return "—"
     return "Rp {:,.0f}".format(value).replace(",", ".")
 
@@ -1723,6 +1723,216 @@ def format_compact_rupiah(value):
     if number.endswith(",0"):
         number = number[:-2]
     return number + suffix
+
+
+def budget_row_review(row):
+    issues = []
+    status = clean_text(row.get("Status Pasangan"))
+    if status and "cocok" not in status.casefold():
+        issues.append(status)
+
+    amount = to_number(row.get("Pagu"))
+    remaining = to_number(row.get("Sisa anggaran"))
+    if amount is None:
+        issues.append("Pagu belum tersedia")
+    elif amount < 0:
+        issues.append("Pagu bernilai negatif")
+    if remaining is not None and remaining < 0:
+        issues.append("Sisa bernilai negatif")
+    elif amount is not None and remaining is not None and remaining > amount:
+        issues.append("Sisa melebihi pagu")
+    if clean_text(row.get("Kecukupan")) in ("Cek sisa", "Sisa tidak lebih besar"):
+        issues.append(clean_text(row.get("Kecukupan")))
+    return "🔴 Perlu tinjauan: " + "; ".join(dict.fromkeys(issues)) if issues else "Sesuai"
+
+
+def budget_editor_frame(rows):
+    frame = pd.DataFrame(rows).drop(columns=["_raw"], errors="ignore")
+    money_columns = [
+        column for column in (
+            "Pagu", "Pagu Penuh", "Pagu Efektif", "Pagu Terblokir",
+            "Realisasi", "Sisa anggaran",
+        )
+        if column in frame.columns
+    ]
+    for column in money_columns:
+        frame[column] = frame[column].map(format_rupiah)
+    frame.insert(0, "Tinjauan", [budget_row_review(row) for row in rows])
+    return frame, money_columns
+
+
+def style_budget_editor(frame):
+    return frame.style.apply(
+        lambda row: [
+            "background-color: #fee2e2; color: #b91c1c"
+            if "Perlu tinjauan" in str(row.get("Tinjauan", ""))
+            else ""
+            for _ in row
+        ],
+        axis=1,
+    )
+
+
+def style_review_rows(frame, warning_flags):
+    return frame.style.apply(
+        lambda row: [
+            "background-color: #fee2e2; color: #b91c1c"
+            if warning_flags.get(row.name, False)
+            else ""
+            for _ in row
+        ],
+        axis=1,
+    )
+
+
+def apply_budget_edits(analysis, edited_frame, money_columns):
+    rows_by_number = {row.get("Baris"): row for row in analysis.get("rows", [])}
+    changed = False
+    editable_columns = [
+        column for column in edited_frame.columns
+        if column not in ("Baris", "Tinjauan") and column != "_raw"
+    ]
+    for _, edited in edited_frame.iterrows():
+        row = rows_by_number.get(edited.get("Baris"))
+        if row is None:
+            continue
+        edited_money = {}
+        changed_money = set()
+        for column in editable_columns:
+            value = edited[column]
+            if column in money_columns:
+                if clean_text(value) not in ("", "—") and to_number(value) is None:
+                    raise ValueError(
+                        "Nilai pada kolom {} tidak valid. Gunakan format rupiah, misalnya Rp 1.500.000.".format(column)
+                    )
+                value = to_number(value)
+                previous = to_number(row.get(column))
+                if value != previous:
+                    changed_money.add(column)
+                    changed = True
+                edited_money[column] = value
+            else:
+                value = clean_text(value)
+                if value != clean_text(row.get(column)):
+                    row[column] = value
+                    changed = True
+                if column != "Baris":
+                    row[column] = value
+        for column in changed_money:
+            row[column] = edited_money[column]
+        if "Pagu" in changed_money:
+            if analysis.get("budget_comparison") and "Pagu Efektif" in row and "Pagu Efektif" not in changed_money:
+                row["Pagu Efektif"] = edited_money["Pagu"]
+            elif not analysis.get("budget_comparison") and "Pagu Penuh" in row and "Pagu Penuh" not in changed_money:
+                row["Pagu Penuh"] = edited_money["Pagu"]
+        if "Pagu Efektif" in changed_money and "Pagu" not in changed_money:
+            row["Pagu"] = edited_money["Pagu Efektif"]
+        if "Pagu Penuh" in changed_money and "Pagu" not in changed_money and row.get("Pagu Efektif") is None:
+            row["Pagu"] = edited_money["Pagu Penuh"]
+
+    if changed:
+        refresh_edited_budget_analysis(analysis)
+    return changed
+
+
+def refresh_edited_budget_analysis(analysis):
+    rows = analysis.get("rows", [])
+    for row in rows:
+        if analysis.get("budget_comparison"):
+            effective = row.get("Pagu Efektif")
+            row["Pagu"] = effective if effective is not None else row.get("Pagu Penuh")
+
+    positive = [
+        row["Pagu"] for row in rows
+        if row.get("Pagu") is not None and row["Pagu"] > 0
+    ]
+    analysis["ranked"] = sorted(rows, key=lambda row: row.get("Pagu") or 0, reverse=True)[:5]
+    analysis["pagu_total"] = max(positive) if positive else None
+    remaining_values = [
+        row["Sisa anggaran"] for row in rows
+        if row.get("Sisa anggaran") is not None and row["Sisa anggaran"] >= 0
+    ]
+    analysis["remaining_total"] = max(remaining_values) if remaining_values else None
+
+    if analysis.get("budget_comparison"):
+        level_rows = [
+            row for row in rows
+            if row.get("Tingkat") == "Program"
+        ]
+        if not level_rows:
+            level_rows = next(
+                (
+                    [row for row in rows if row.get("Tingkat") == label]
+                    for label in BUDGET_LEVEL_LABELS.values()
+                    if any(row.get("Tingkat") == label for row in rows)
+                ),
+                [],
+            )
+        for key, column in (
+            ("pagu_penuh", "Pagu Penuh"),
+            ("pagu_efektif", "Pagu Efektif"),
+            ("pagu_terblokir", "Pagu Terblokir"),
+            ("realisasi", "Realisasi"),
+            ("sisa", "Sisa anggaran"),
+        ):
+            values = [row.get(column) for row in level_rows if row.get(column) is not None]
+            analysis["budget_comparison"][key] = sum(values) if values else None
+        analysis["pagu_total"] = (
+            analysis["budget_comparison"]["pagu_efektif"]
+            if analysis["budget_comparison"]["pagu_efektif"] is not None
+            else analysis["budget_comparison"]["pagu_penuh"]
+        )
+        analysis["remaining_total"] = analysis["budget_comparison"]["sisa"]
+
+    category_levels = {}
+    for kind, label in BUDGET_LEVEL_LABELS.items():
+        level_rows = [
+            row for row in rows
+            if row.get("Tingkat") == label and row.get("Pagu") is not None and row["Pagu"] > 0
+        ]
+        if level_rows:
+            level_categories = [
+                {
+                    "Tingkat": label,
+                    "Kode": row["Kode"],
+                    "Kategori": "{}{}{}".format(
+                        "{} · ".format(row["Kode"]) if row["Kode"] else "",
+                        row["Uraian"],
+                        " (induk {})".format(row["Induk"]) if row.get("Induk") else "",
+                    ),
+                    "Pagu": row["Pagu"],
+                    "Pagu Penuh": row.get("Pagu Penuh"),
+                    "Pagu Efektif": row.get("Pagu Efektif"),
+                    "Pagu Terblokir": row.get("Pagu Terblokir"),
+                    "Realisasi": row.get("Realisasi"),
+                    "Sisa": row.get("Sisa anggaran"),
+                }
+                for row in level_rows
+            ]
+            category_levels[kind] = sorted(
+                level_categories,
+                key=lambda category: category["Pagu"],
+                reverse=True,
+            )
+    if category_levels:
+        category_levels["ALL"] = sorted(
+            [
+                dict(category, Kategori="{} · {}".format(category["Tingkat"], category["Kategori"]))
+                for categories in category_levels.values()
+                for category in categories
+            ],
+            key=lambda category: category["Pagu"],
+            reverse=True,
+        )
+        analysis["category_levels"] = category_levels
+        default_level = analysis.get("default_category_level")
+        if default_level in category_levels:
+            analysis["categories"] = category_levels[default_level]
+    analysis["category_total"] = sum(row["Pagu"] for row in analysis.get("categories", []))
+    analysis["category_remaining_total"] = sum(
+        row["Sisa"] for row in analysis.get("categories", [])
+        if row.get("Sisa") is not None
+    )
 
 
 def load_analysis():
@@ -2048,8 +2258,24 @@ def render_dashboard(data):
             "Kenaikan dinilai cukup hanya jika sisa FA lebih besar dari selisih (sisa setelah kenaikan > Rp0)."
         )
         if revision["changes"]:
-            revision_frame = pd.DataFrame(revision["changes"]).drop(columns=["_status", "_path"], errors="ignore")
-            st.dataframe(revision_frame, use_container_width=True, hide_index=True)
+            revision_frame = pd.DataFrame(revision["changes"])
+            warning_flags = revision_frame["_status"].isin(("short", "unknown")).to_dict()
+            revision_frame = revision_frame.drop(columns=["_status", "_path"], errors="ignore")
+            for column in (
+                "Pagu semula", "Pagu menjadi", "Selisih", "Sisa anggaran",
+                "Sisa setelah kenaikan",
+            ):
+                if column in revision_frame.columns:
+                    revision_frame[column] = revision_frame[column].map(
+                        lambda value: format_rupiah(value)
+                        if value is not None and not pd.isna(value)
+                        else None
+                    )
+            st.dataframe(
+                style_review_rows(revision_frame, warning_flags),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     if categories:
         chart_frame = pd.DataFrame(categories)
@@ -2221,7 +2447,42 @@ def render_dashboard(data):
         if search:
             mask = prepared["Uraian"].str.contains(search, case=False, na=False) | prepared["Kode"].str.contains(search, case=False, na=False)
             prepared = prepared.loc[mask]
-        st.dataframe(prepared.drop(columns=["_raw"], errors="ignore"), use_container_width=True, hide_index=True)
+        editor_frame, money_columns = budget_editor_frame(prepared.to_dict("records"))
+        review_count = editor_frame["Tinjauan"].str.contains("Perlu tinjauan", regex=False).sum()
+        if review_count:
+            st.error(
+                "🔴 {} baris memerlukan tinjauan. Lihat kolom Tinjauan pada tabel dan periksa alasan yang tercantum.".format(
+                    review_count
+                )
+            )
+        editor_frame = editor_frame.set_index("Baris", drop=False)
+        editor_key = "rab_editor_v2_{}".format(
+            hashlib.sha1(
+                "{}:{}".format(st.session_state.get("upload_key", ""), analysis["sheet"]).encode("utf-8")
+            ).hexdigest()[:12]
+        )
+        edited_frame = st.data_editor(
+            style_budget_editor(editor_frame),
+            use_container_width=True,
+            hide_index=True,
+            key=editor_key,
+            column_config={
+                "Baris": st.column_config.NumberColumn("Baris", disabled=True, format="%d"),
+                "Tinjauan": st.column_config.TextColumn("Tinjauan", disabled=True),
+                **{
+                    column: st.column_config.TextColumn(
+                        column,
+                        help="Masukkan nilai rupiah, misalnya Rp 1.500.000.",
+                    )
+                    for column in money_columns
+                },
+            },
+        )
+        try:
+            if apply_budget_edits(analysis, edited_frame, money_columns):
+                st.rerun()
+        except ValueError as error:
+            st.error(str(error))
     else:
         st.warning("Struktur tabel belum dikenali. Pastikan terdapat header uraian dan pagu/jumlah.")
 
