@@ -3,12 +3,13 @@ const state = {
   selectedSheet: null,
   currentAnalysis: null,
   generatedSections: null,
+  torSourceRowNumber: null,
+  torAmountOverride: null,
+  torRemainingOverride: null,
 };
 
 const byId = (id) => document.getElementById(id);
 const rupiah = new Intl.NumberFormat("id-ID", {
-  style: "currency",
-  currency: "IDR",
   maximumFractionDigits: 0,
 });
 const compact = new Intl.NumberFormat("id-ID", {
@@ -353,13 +354,7 @@ function cleanText(value) {
 function toNumber(value) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value !== "string") return null;
-  const cleaned = value.replace(/[^\d,.-]/g, "").trim();
-  if (!cleaned || /^-+$/.test(cleaned)) return null;
-  const normalized = cleaned.includes(",") && !cleaned.includes(".")
-    ? cleaned.replace(",", ".")
-    : cleaned.replace(/,/g, "");
-  const result = Number(normalized);
-  return Number.isFinite(result) ? result : null;
+  return parseMoneyInput(value);
 }
 
 const CHART_COLORS = ["#092759", "#087cb5", "#3d91b8", "#7a9bb5", "#a8bbc9", "#c3ccd4"];
@@ -685,12 +680,33 @@ function buildAnalysis(sheet) {
 }
 
 function formatMoney(value) {
-  return value === null || value === undefined ? "—" : rupiah.format(value);
+  return value === null || value === undefined ? "—" : `Rp ${rupiah.format(value)}`;
 }
 
 function formatCompact(value) {
   if (value === null || value === undefined) return "—";
   return `Rp ${compact.format(value)}`;
+}
+
+function parseMoneyInput(value) {
+  const cleaned = String(value ?? "").replace(/[^\d,.-]/g, "").trim();
+  if (!cleaned || /^-+$/.test(cleaned)) return null;
+  let normalized = cleaned;
+  const commaIndex = cleaned.lastIndexOf(",");
+  const dotIndex = cleaned.lastIndexOf(".");
+  if (commaIndex >= 0 && dotIndex >= 0) {
+    const decimalSeparator = commaIndex > dotIndex ? "," : ".";
+    const groupingSeparator = decimalSeparator === "," ? "." : ",";
+    normalized = cleaned.split(groupingSeparator).join("");
+    if (decimalSeparator === ",") normalized = normalized.replace(",", ".");
+  } else if (commaIndex >= 0 || dotIndex >= 0) {
+    const separator = commaIndex >= 0 ? "," : ".";
+    const parts = cleaned.split(separator);
+    const isGrouped = parts.length > 2 || (parts.length === 2 && parts[1].length === 3 && parts[0].replace("-", "").length <= 3);
+    normalized = isGrouped ? parts.join("") : cleaned.replace(separator, ".");
+  }
+  const result = Number(normalized);
+  return Number.isFinite(result) ? result : null;
 }
 
 function findDefaultActivityRow(analysis) {
@@ -813,12 +829,12 @@ function renderStats(analysis) {
   const stats = [
     {
       label: "Total pagu kategori",
-      value: formatCompact(hasCategories ? analysis.chartBudgetTotal : null),
+      value: formatMoney(hasCategories ? analysis.chartBudgetTotal : null),
       foot: hasCategories ? `${analysis.chartCategories.length} kategori · ${analysis.chartGrouping}` : "Kategori anggaran belum terbaca",
     },
     {
       label: "Sisa anggaran terdeteksi",
-      value: formatCompact(remainingAvailable ? analysis.chartRemainingTotal : null),
+      value: formatMoney(remainingAvailable ? analysis.chartRemainingTotal : null),
       foot: remainingAvailable ? `${analysis.chartRemainingCount} kategori memiliki data sisa` : "Data sisa tidak tersedia pada kategori",
     },
     {
@@ -957,7 +973,7 @@ function renderDonutChart(analysis) {
       return `<div class="donut-legend-item" title="${escapeHtml(slice.label)}: ${escapeHtml(formatMoney(slice.amount))}">
         <span class="donut-dot" style="--slice-color:${slice.color}"></span>
         <span class="donut-label">${escapeHtml(slice.label)}</span>
-        <span class="donut-amount">${escapeHtml(formatCompact(slice.amount))}</span>
+        <span class="donut-amount">${escapeHtml(formatMoney(slice.amount))}</span>
         <span class="donut-share">${share}%</span>
       </div>`;
     }).join("");
@@ -1038,21 +1054,22 @@ function renderRemainingChart(analysis) {
     return `<div class="remaining-row" title="${escapeHtml(label)}: ${escapeHtml(formatMoney(category.remaining))}">
       <div class="remaining-row-top">
         <span class="remaining-label">${escapeHtml(label)}</span>
-        <strong>${escapeHtml(formatCompact(category.remaining))}</strong>
+        <strong>${escapeHtml(formatMoney(category.remaining))}</strong>
       </div>
       <div class="remaining-track" role="img" aria-label="${escapeHtml(label)}: ${share}% dari sisa pada kategori teratas">
         <span class="remaining-fill" style="width:${width}%"></span>
       </div>
     </div>`;
   }).join("");
-  byId("remaining-caption").textContent = `5 kategori dengan sisa terbesar · total ${formatCompact(totalRemaining)}`;
+  byId("remaining-caption").textContent = `5 kategori dengan sisa terbesar · total ${formatMoney(totalRemaining)}`;
 }
 
 function renderInsights(analysis) {
   const insights = buildInsights(analysis);
   byId("insight-list").innerHTML = insights.map((insight) => `
     <div class="insight-item ${insight.warning ? "warning" : ""}">
-      <div class="insight-copy"><strong>${escapeHtml(insight.title)}</strong><p>${escapeHtml(insight.text)}</p></div>
+      <div class="insight-copy">${insight.warning ? '<span class="insight-warning-label">PERLU PERHATIAN</span>' : ""}
+        <strong>${escapeHtml(insight.title)}</strong><p>${escapeHtml(insight.text)}</p></div>
     </div>`).join("");
 }
 
@@ -1109,15 +1126,14 @@ function renderTableRows(analysis, columns) {
       unknown: "Cek sisa",
       decrease: "Pengurangan",
     };
-    const formatAmount = (value) => value === null ? "—" : formatMoney(value);
     byId("table-body").innerHTML = shown.length
-      ? shown.map((row) => `<tr>
+      ? shown.map((row) => `<tr class="${["short", "unknown"].includes(row.status) ? "warning-row" : ""}">
         <td title="${escapeHtml(row.originalDescription || "Tidak ada pada Semula")}">${escapeHtml(row.originalDescription || "—")}</td>
-        <td class="amount">${escapeHtml(formatAmount(row.originalAmount))}</td>
+        <td class="amount">${escapeHtml(formatMoney(row.originalAmount))}</td>
         <td title="${escapeHtml(row.revisedDescription || "Tidak ada pada Menjadi")}">${escapeHtml(row.revisedDescription || "—")}</td>
-        <td class="amount">${escapeHtml(formatAmount(row.revisedAmount))}</td>
+        <td class="amount">${escapeHtml(formatMoney(row.revisedAmount))}</td>
         <td class="amount ${row.delta < 0 ? "revision-decrease" : ""}">${escapeHtml(formatMoney(row.delta))}</td>
-        <td class="amount">${escapeHtml(formatAmount(row.remaining))}</td>
+        <td class="amount">${escapeHtml(formatMoney(row.remaining))}</td>
         <td><span class="revision-row-status ${row.status}">${statusLabels[row.status]}</span></td>
       </tr>`).join("")
       : `<tr><td colspan="7">Tidak ada rincian perubahan yang cocok.</td></tr>`;
@@ -1151,12 +1167,68 @@ function updateTorSource(analysis, sheet) {
   if (!byId("location-input").value || !state.generatedSections) byId("location-input").value = location;
   if (!byId("year-input").value || !state.generatedSections) byId("year-input").value = year;
 
-  const amount = analysis.total === null ? "Belum terdeteksi" : formatMoney(analysis.total);
-  const remaining = analysis.remaining === null ? "Belum terdeteksi" : formatMoney(analysis.remaining);
+  const sourceRows = analysis.rows.filter((row) => row.amount !== null || row.remaining !== null);
+  let selectedRow = sourceRows.find((row) => row.rowNumber === state.torSourceRowNumber);
+  if (!selectedRow) {
+    selectedRow = sourceRows.find((row) => row.description === activity)
+      ?? findDefaultActivityRow(analysis)
+      ?? sourceRows[0];
+    state.torSourceRowNumber = selectedRow?.rowNumber ?? null;
+    state.torAmountOverride = null;
+    state.torRemainingOverride = null;
+  }
+
+  if (!selectedRow) {
+    byId("source-summary").classList.remove("editable");
+    byId("source-summary").innerHTML = `
+      <div><strong>${escapeHtml(sheet.name)} · Data nilai belum terdeteksi</strong>
+        <p>Data RAB yang memiliki uraian dan nilai pagu/sisa belum tersedia pada sheet ini.</p>
+      </div>`;
+    return;
+  }
+
+  const selectedAmount = state.torAmountOverride ?? (selectedRow.amount === null ? "" : formatMoney(selectedRow.amount));
+  const selectedRemaining = state.torRemainingOverride ?? (selectedRow.remaining === null ? "" : formatMoney(selectedRow.remaining));
+  const options = sourceRows.map((row) => {
+    const label = `${row.code ? `${row.code} · ` : ""}${row.description} · ${formatMoney(row.amount)}`;
+    return `<option value="${row.rowNumber}" ${row.rowNumber === selectedRow.rowNumber ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  byId("source-summary").classList.add("editable");
   byId("source-summary").innerHTML = `
-    <div><strong>${escapeHtml(sheet.name)} · ${escapeHtml(amount)}</strong>
-      <p>Sisa terdeteksi: ${escapeHtml(remaining)} · ${analysis.valueRows} baris bernilai</p>
-    </div>`;
+    <div class="source-summary-heading"><strong>Sumber RAB untuk draft TOR</strong><span>${escapeHtml(sheet.name)}</span></div>
+    <label class="source-field">Pilih rincian RAB
+      <select id="tor-source-row">${options}</select>
+    </label>
+    <div class="source-fields">
+      <label class="source-field">Pagu untuk TOR
+        <input id="tor-source-amount" type="text" inputmode="decimal" value="${escapeHtml(selectedAmount)}" placeholder="Contoh: Rp 1.500.000">
+      </label>
+      <label class="source-field">Sisa anggaran
+        <input id="tor-source-remaining" type="text" inputmode="decimal" value="${escapeHtml(selectedRemaining)}" placeholder="Belum terdeteksi">
+      </label>
+    </div>
+    <small class="source-edit-hint">Perubahan hanya berlaku untuk draft TOR, tidak mengubah data asli RAB.</small>
+    <small class="source-edit-warning hidden" id="tor-source-warning" role="alert"></small>`;
+  updateTorSourceWarning();
+}
+
+function updateTorSourceWarning() {
+  const warning = byId("tor-source-warning");
+  const amountInput = byId("tor-source-amount");
+  const remainingInput = byId("tor-source-remaining");
+  if (!warning || !amountInput || !remainingInput) return;
+
+  const messages = [];
+  const amount = parseMoneyInput(amountInput.value);
+  const remaining = parseMoneyInput(remainingInput.value);
+  if (amount === null) messages.push("Pagu untuk TOR belum diisi atau formatnya tidak valid.");
+  else if (amount < 0) messages.push("Pagu untuk TOR bernilai negatif; periksa kembali data.");
+  if (!remainingInput.value.trim()) messages.push("Sisa anggaran belum terdeteksi; verifikasi langsung pada RAB.");
+  else if (remaining === null) messages.push("Format sisa anggaran tidak valid.");
+  else if (remaining < 0) messages.push("Sisa anggaran bernilai negatif; periksa kembali data.");
+
+  warning.textContent = messages.join(" ");
+  warning.classList.toggle("hidden", messages.length === 0);
 }
 
 function renderDashboard() {
@@ -1212,6 +1284,9 @@ async function loadFile(file) {
     byId("upload-panel").classList.add("hidden");
     byId("table-search").value = "";
     state.generatedSections = null;
+    state.torSourceRowNumber = null;
+    state.torAmountOverride = null;
+    state.torRemainingOverride = null;
     renderDashboard();
   } catch (error) {
     byId("file-status").textContent = "Gagal dibaca";
@@ -1247,24 +1322,28 @@ function makeTorSections() {
   const location = cleanText(byId("location-input").value) || "Lokasi pelaksanaan ditetapkan kemudian";
   const year = cleanText(byId("year-input").value) || String(new Date().getFullYear());
   const notes = cleanText(byId("notes-input").value);
-  const activityRow = analysis?.rows?.find((row) =>
-    row.description.toLocaleLowerCase("id") === activity.toLocaleLowerCase("id") && row.amount !== null,
-  );
-  const amount = activityRow
-    ? `Pada baris ${activityRow.rowNumber}${activityRow.code ? ` dengan kode ${activityRow.code}` : ""} tercatat nilai ${formatMoney(activityRow.amount)}. Nilai ini perlu diverifikasi terhadap RAB final.`
-    : "Belum ditemukan baris anggaran yang cocok persis dengan nama kegiatan ini. Cocokkan nilai dan kode akun secara manual pada RAB sebelum TOR digunakan.";
-  const remaining = activityRow?.remaining === null || activityRow?.remaining === undefined
-    ? "Sisa anggaran untuk baris kegiatan ini belum teridentifikasi."
-    : `Sisa anggaran pada baris kegiatan ini tercatat ${formatMoney(activityRow.remaining)}; mohon verifikasi terhadap RAB final.`;
+  const activityRow = analysis?.rows?.find((row) => row.rowNumber === state.torSourceRowNumber);
+  const amount = state.torAmountOverride === null
+    ? activityRow?.amount ?? null
+    : parseMoneyInput(state.torAmountOverride);
+  const remainingValue = state.torRemainingOverride === null
+    ? activityRow?.remaining ?? null
+    : parseMoneyInput(state.torRemainingOverride);
+  const amountText = amount === null
+    ? "Nilai pagu belum diisi atau formatnya tidak valid. Periksa kembali sumber anggaran sebelum TOR digunakan."
+    : `Pada baris ${activityRow?.rowNumber ?? "pilihan"}${activityRow?.code ? ` dengan kode ${activityRow.code}` : ""} tercatat nilai ${formatMoney(amount)}. Nilai ini perlu diverifikasi terhadap RAB final.`;
+  const remaining = remainingValue === null
+    ? "Sisa anggaran untuk baris kegiatan ini belum diidentifikasi atau formatnya tidak valid."
+    : `Sisa anggaran pada baris kegiatan ini tercatat ${formatMoney(remainingValue)}; mohon verifikasi terhadap RAB final.`;
   const purpose = notes || `Kegiatan ${activity} dilaksanakan untuk mendukung pencapaian target kinerja unit kerja melalui pelaksanaan kegiatan yang terencana, terukur, dan sesuai ketentuan yang berlaku.`;
   return [
-    ["I. Latar Belakang", `Pelaksanaan ${activity} pada tahun ${year} perlu direncanakan secara terarah agar kebutuhan, tahapan, dan keluaran kegiatan dapat dipertanggungjawabkan. Kerangka acuan kerja ini disusun sebagai dasar pelaksanaan kegiatan di ${location}. ${amount}`],
+    ["I. Latar Belakang", `Pelaksanaan ${activity} pada tahun ${year} perlu direncanakan secara terarah agar kebutuhan, tahapan, dan keluaran kegiatan dapat dipertanggungjawabkan. Kerangka acuan kerja ini disusun sebagai dasar pelaksanaan kegiatan di ${location}. ${amountText}`],
     ["II. Maksud dan Tujuan", purpose],
     ["III. Sasaran", `Sasaran kegiatan adalah terlaksananya ${activity} sesuai kebutuhan unit kerja, dengan penerima manfaat dan target kuantitatif ditetapkan oleh penanggung jawab kegiatan sebelum pelaksanaan.`],
     ["IV. Ruang Lingkup", `Ruang lingkup mencakup persiapan, koordinasi, pelaksanaan, pemantauan, dan penyusunan laporan ${activity}. Rincian volume, komponen teknis, serta akun mengikuti baris kegiatan terpilih dan ketentuan dalam RAB yang telah disetujui.`],
     ["V. Keluaran", `Terselenggaranya ${activity} dan tersedianya dokumentasi serta laporan pelaksanaan yang memuat realisasi keluaran dan penggunaan anggaran.`],
     ["VI. Waktu dan Tempat", `Kegiatan direncanakan pada tahun ${year} di ${location}. Jadwal rinci disusun oleh pelaksana dengan memperhatikan ketersediaan anggaran dan target keluaran.`],
-    ["VII. Pembiayaan", `${amount} ${remaining} Pembiayaan dibebankan pada DIPA/unit kerja yang relevan sesuai akun dan pagu yang disahkan. Seluruh nilai wajib diverifikasi terhadap dokumen RAB final sebelum TOR ditetapkan.`],
+    ["VII. Pembiayaan", `${amountText} ${remaining} Pembiayaan dibebankan pada DIPA/unit kerja yang relevan sesuai akun dan pagu yang disahkan. Seluruh nilai wajib diverifikasi terhadap dokumen RAB final sebelum TOR ditetapkan.`],
     ["VIII. Penutup", `TOR ini merupakan draft awal yang disusun dari data RAB terpilih. Penanggung jawab kegiatan perlu melengkapi indikator, jadwal rinci, dasar hukum, susunan pelaksana, dan persetujuan pejabat berwenang sebelum dokumen digunakan.`],
   ].map(([heading, text]) => ({ heading, text, sheetName: sheet?.name ?? "" }));
 }
@@ -1391,6 +1470,7 @@ function openFilePicker() {
   byId("file-input").click();
 }
 
+if (byId("show-login")) {
 byId("show-login").addEventListener("click", () => showAuthPanel("login"));
 byId("show-register").addEventListener("click", () => showAuthPanel("register"));
 byId("start-camera").addEventListener("click", async () => {
@@ -1512,6 +1592,9 @@ byId("logout-button").addEventListener("click", async () => {
   state.selectedSheet = null;
   state.currentAnalysis = null;
   state.generatedSections = null;
+  state.torSourceRowNumber = null;
+  state.torAmountOverride = null;
+  state.torRemainingOverride = null;
   byId("dashboard-results").classList.add("hidden");
   byId("dataset-bar").classList.add("hidden");
   byId("upload-panel").classList.remove("hidden");
@@ -1545,6 +1628,7 @@ try {
   showAuthPanel("register");
   setAuthMessage("register-message", error.message);
 }
+}
 
 byId("open-upload").addEventListener("click", openFilePicker);
 byId("file-input").addEventListener("change", (event) => loadFile(event.target.files[0]));
@@ -1552,7 +1636,34 @@ byId("replace-file").addEventListener("click", openFilePicker);
 byId("sheet-select").addEventListener("change", (event) => {
   state.selectedSheet = event.target.value;
   state.generatedSections = null;
+  state.torSourceRowNumber = null;
+  state.torAmountOverride = null;
+  state.torRemainingOverride = null;
   renderDashboard();
+});
+byId("source-summary").addEventListener("change", (event) => {
+  if (event.target.id !== "tor-source-row") return;
+  const selectedRow = state.currentAnalysis?.rows.find((row) => row.rowNumber === Number(event.target.value));
+  if (!selectedRow) return;
+  state.torSourceRowNumber = selectedRow.rowNumber;
+  state.torAmountOverride = null;
+  state.torRemainingOverride = null;
+  const sheet = state.workbook?.sheets.find((item) => item.name === state.selectedSheet);
+  if (sheet && state.currentAnalysis) updateTorSource(state.currentAnalysis, sheet);
+  byId("activity-input").value = selectedRow.description;
+  if (state.generatedSections) generateTor(false);
+});
+byId("source-summary").addEventListener("input", (event) => {
+  if (event.target.id === "tor-source-amount") state.torAmountOverride = event.target.value;
+  else if (event.target.id === "tor-source-remaining") state.torRemainingOverride = event.target.value;
+  else return;
+  updateTorSourceWarning();
+  if (state.generatedSections) generateTor(false);
+});
+byId("source-summary").addEventListener("focusout", (event) => {
+  if (!["tor-source-amount", "tor-source-remaining"].includes(event.target.id)) return;
+  const value = parseMoneyInput(event.target.value);
+  if (value !== null) event.target.value = formatMoney(value);
 });
 byId("table-search").addEventListener("input", () => {
   if (state.currentAnalysis) renderTableRows(state.currentAnalysis, displayColumns(state.currentAnalysis));

@@ -6,72 +6,10 @@
     <meta name="theme-color" content="#092759">
     <title>Ruang Anggaran — Insight & TOR</title>
     <link rel="stylesheet" href="/styles.css">
-    <script src="/vendor/face-api/face-api.js" defer></script>
-    <script src="/vendor/tesseract/tesseract.min.js" defer></script>
-    <script src="/vendor/index.iife.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
-    <section class="auth-screen" id="auth-screen">
-      <div class="auth-card">
-        <div class="auth-brand">RAB <span>&amp; TOR</span></div>
-        <div id="register-panel">
-          <div class="auth-heading">
-            <h1>Sign Up</h1>
-            <p>Daftar untuk melanjutkan ke dashboard</p>
-          </div>
-          <form id="register-form" class="auth-form">
-            <div id="credentials-step" class="auth-step">
-              <label><span class="sr-only">Email</span><input id="register-email" type="email" placeholder="Email" autocomplete="email" required></label>
-              <label><span class="sr-only">Kata sandi</span><input id="register-password" type="password" placeholder="Password" autocomplete="new-password" minlength="8" required></label>
-              <button class="primary-button auth-submit" id="continue-registration" type="button">Sign Up</button>
-            </div>
-            <div id="verification-step" class="auth-step hidden">
-              <div class="auth-verification-fields">
-                <label class="auth-field-label" for="employee-number">Nomor pegawai di kartu</label>
-                <input id="employee-number" type="text" inputmode="numeric" autocomplete="off" minlength="5" maxlength="24" placeholder="Nomor pegawai" required disabled>
-                <label class="auth-field-label" for="employee-card-photo">Foto kartu pegawai</label>
-                <label class="file-picker" for="employee-card-photo"><span>Pilih foto kartu</span><small>JPG, PNG, atau gambar lain</small></label>
-                <input id="employee-card-photo" type="file" accept="image/*" required disabled>
-                <small class="verification-hint">Pilih foto yang jelas, bagian depan kartu saja.</small>
-              </div>
-              <div class="camera-block">
-                <div class="camera-heading"><strong>Selfie bersama kartu</strong><span id="camera-status">Kamera belum dinyalakan</span></div>
-                <video id="verification-camera" autoplay muted playsinline></video>
-                <canvas id="verification-capture" class="hidden"></canvas>
-                <div class="camera-actions">
-                  <button class="secondary-button" id="start-camera" type="button">Nyalakan kamera</button>
-                  <button class="secondary-button" id="capture-photo" type="button" disabled>Ambil selfie + kartu</button>
-                </div>
-                <small>Pegang kartu dekat kamera dan hindari pantulan; pastikan wajah serta nomor pada kartu fokus. Kamera hanya dipakai untuk mengambil gambar pada sesi ini.</small>
-              </div>
-              <p class="verification-disclaimer">Prototipe ini memproses gambar di browser dan tidak menyimpan atau mengirim foto. Pemeriksaan wajah dan nomor kartu bersifat awal, tidak membuktikan kartu asli atau status pegawai, dan bukan liveness anti-pemalsuan. Kamera memerlukan HTTPS atau localhost. Jangan gunakan untuk melindungi data rahasia.</p>
-            </div>
-            <div class="auth-message hidden" id="register-message" role="alert"></div>
-            <div id="verification-actions" class="auth-step hidden">
-              <button class="primary-button auth-submit" id="register-submit" type="submit">Verify and Sign Up</button>
-              <button class="auth-back" id="back-to-credentials" type="button">Back</button>
-            </div>
-          </form>
-          <p class="auth-switch">Have an account? <button id="show-login" type="button">Log In</button></p>
-        </div>
-        <div id="login-panel" class="hidden">
-          <div class="auth-heading">
-            <h1>Log In</h1>
-            <p>Masuk ke dashboard</p>
-          </div>
-          <form id="login-form" class="auth-form">
-            <label><span class="sr-only">Email</span><input id="login-email" type="email" placeholder="Email" autocomplete="username" required></label>
-            <label><span class="sr-only">Kata sandi</span><input id="login-password" type="password" placeholder="Password" autocomplete="current-password" required></label>
-            <div class="auth-message hidden" id="login-message" role="alert"></div>
-            <button class="primary-button auth-submit" type="submit">Log In</button>
-          </form>
-          <p class="auth-switch">Don’t have an account? <button id="show-register" type="button">Sign Up</button></p>
-        </div>
-      </div>
-    </section>
-
-    <div class="app-shell hidden" id="app-shell">
+    <div class="app-shell" id="app-shell">
       <aside class="sidebar">
         <a class="brand" href="#" aria-label="RAB dan TOR">
           <span>RAB <span class="brand-light">&amp; TOR</span></span>
@@ -108,7 +46,6 @@
               <img src="/image/djid.png" alt="Direktorat Jenderal Infrastruktur Digital">
               <img src="/image/komdigi.png" alt="Kementerian Komunikasi dan Digital">
             </div>
-            <button class="text-button logout-button" id="logout-button" type="button">Keluar</button>
           </div>
         </header>
 
@@ -224,7 +161,7 @@
                 <label>Tujuan / catatan khusus<textarea id="notes-input" rows="4" placeholder="Tambahkan konteks atau arahan yang perlu masuk ke TOR..."></textarea><small>Catatan ini akan disertakan dalam draft.</small></label>
               </div>
               <div class="source-summary" id="source-summary">
-                <div><strong>Belum ada RAB terhubung</strong><p>Unggah file di tab Dashboard untuk menarik angka ke sini.</p></div>
+                <div><strong>Belum ada RAB terhubung</strong><p>Unggah RAB di tab Dashboard untuk memilih rincian serta mengubah nilai pagu/sisa khusus draft TOR.</p></div>
               </div>
               <div class="generator-note"><p>Draft memakai format TOR standar dan data yang terbaca di RAB. Periksa kembali substansi dan angka sebelum digunakan resmi.</p></div>
             </section>
