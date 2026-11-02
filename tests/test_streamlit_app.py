@@ -819,6 +819,14 @@ BAH.078 RO terpilih 1,000,000 0 400,000 0 400,000 40.00 % 600,000
             item.label == "Pilih kode Rincian Output (RO)"
             for item in app.selectbox
         ))
+        budget_input = next(
+            item for item in app.number_input
+            if item.label == "Biaya yang diperlukan dari dashboard (Rp)"
+        )
+        self.assertEqual(budget_input.value, 1_000_000)
+        budget_input.set_value(3_301_868_000)
+        app.run(timeout=30)
+        self.assertEqual(len(app.exception), 0)
         next(button for button in app.button if button.label == "Buat draft TOR dari template").click()
         app.run(timeout=30)
         self.assertEqual(len(app.exception), 0)
@@ -826,6 +834,12 @@ BAH.078 RO terpilih 1,000,000 0 400,000 0 400,000 40.00 % 600,000
             item.label == "Unduh TOR dalam Word"
             for item in app.get("download_button")
         ))
+        generated = Document(io.BytesIO(app.session_state["tor_result"]["document"]))
+        cost_paragraph = next(
+            paragraph.text for paragraph in generated.paragraphs
+            if paragraph.text.startswith("Biaya yang diperlukan untuk kegiatan ini sebesar")
+        )
+        self.assertIn("Rp 3.301.868.000", cost_paragraph)
 
 
 if __name__ == "__main__":

@@ -2672,8 +2672,9 @@ def replace_tor_strategy(document, strategy_text):
         paragraph._element.getparent().remove(paragraph._element)
 
 
-def set_tor_budget_cost(document, budget_data):
-    amount = tor_budget_amount(budget_data)
+def set_tor_budget_cost(document, budget_data, amount=None):
+    if amount is None:
+        amount = tor_budget_amount(budget_data)
     if amount is None:
         replacement = "[Pagu belum tersedia pada dashboard]"
     else:
@@ -2741,7 +2742,7 @@ def make_tor_from_local_template(ro_code, budget_data, hierarchy, adjustments):
             )
     if "strategy" in adjustments:
         replace_tor_strategy(document, adjustments["strategy"])
-    set_tor_budget_cost(document, budget_data)
+    set_tor_budget_cost(document, budget_data, adjustments.get("budget_amount"))
 
     output = io.BytesIO()
     document.save(output)
@@ -2810,8 +2811,16 @@ def render_tor(data):
         )
 
     amount = tor_budget_amount(selected_row)
-    st.metric("Biaya yang diperlukan dari dashboard", format_rupiah(amount))
-    st.caption("Sumber biaya: pagu efektif; jika tidak tersedia, memakai pagu penuh.")
+    budget_amount = st.number_input(
+        "Biaya yang diperlukan dari dashboard (Rp)",
+        min_value=0,
+        value=int(amount) if amount is not None else 0,
+        step=100_000,
+        format="%d",
+        key="tor_budget_amount_{}".format(identity),
+        help="Nilai awal diambil dari pagu efektif, atau pagu penuh jika pagu efektif tidak tersedia. Nilai ini dapat disesuaikan untuk draft TOR.",
+    )
+    st.caption("Nilai yang diubah di sini digunakan pada draft TOR dan tidak mengubah data RAB.")
 
     beneficiaries = docx_table_frame(template.tables[4])
     schedule_columns = ["No", "Rincian Aktivitas"] + [
@@ -2878,6 +2887,7 @@ def render_tor(data):
     adjustments = {
         "beneficiaries": docx_frame_rows(beneficiaries),
         "strategy": strategy,
+        "budget_amount": budget_amount,
         "schedule": docx_frame_rows(schedule),
         "kpi_output": docx_frame_rows(kpi_output),
         "kpi_outcome": docx_frame_rows(kpi_outcome),
@@ -2930,7 +2940,7 @@ def main():
             path = ROOT / "image" / filename
             if path.exists():
                 column.image(str(path), use_container_width=True)
-        st.caption("Balai Monitor SFR Kelas I Surabaya")
+        st.caption("Balai Monitor dan Infrastruktur Digital Kota Surabaya")
         st.divider()
         st.caption("Draft dan insight perlu ditinjau sebelum digunakan resmi.")
 
